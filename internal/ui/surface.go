@@ -21,18 +21,10 @@ type surfaceStyle struct {
 	bold bool
 }
 
-type RenderMode struct {
-	Mode       string
-	CellAspect string
-}
-
 type Surface struct {
-	terminalCols int
-	terminalRows int
-	cols         int
-	rows         int
-	render       RenderMode
-	cells        []surfaceCell
+	cols  int
+	rows  int
+	cells []surfaceCell
 }
 
 func NewSurface(cols, rows int) Surface {
@@ -48,24 +40,11 @@ func (s *Surface) Resize(cols, rows int) {
 	if rows < 1 {
 		rows = 1
 	}
-	s.terminalCols = cols
-	s.terminalRows = rows
-	s.cols, s.rows = s.logicalSize(cols, rows)
+	s.cols, s.rows = cols, rows
 	s.cells = make([]surfaceCell, s.cols*s.rows)
 	for i := range s.cells {
 		s.cells[i] = surfaceCell{ch: " ", fg: "#cbd5e1", bg: "#020617"}
 	}
-}
-
-func (s *Surface) SetRender(render RenderMode) {
-	if render.Mode == "" {
-		render.Mode = ggp.RenderModeCells
-	}
-	if render.CellAspect == "" {
-		render.CellAspect = ggp.CellAspectTerminal
-	}
-	s.render = render
-	s.Resize(s.terminalCols, s.terminalRows)
 }
 
 func (s Surface) Viewport() (int, int) {
@@ -95,20 +74,13 @@ func (s *Surface) Apply(frame ggp.Frame) {
 }
 
 func (s Surface) Render() string {
-	switch s.render.CellAspect {
-	case ggp.CellAspectSquareWide:
-		return s.renderSquareWide()
-	case ggp.CellAspectSquareHalf:
-		return s.renderSquareHalf()
-	default:
-		return s.renderTerminalCells()
-	}
+	return s.renderTerminalCells()
 }
 
 func (s Surface) renderTerminalCells() string {
 	var b strings.Builder
 	for y := 0; y < s.rows; y++ {
-		b.WriteString(s.renderStyledRow(y, false))
+		b.WriteString(s.renderStyledRow(y))
 		if y < s.rows-1 {
 			b.WriteByte('\n')
 		}
@@ -116,18 +88,7 @@ func (s Surface) renderTerminalCells() string {
 	return b.String()
 }
 
-func (s Surface) renderSquareWide() string {
-	var b strings.Builder
-	for y := 0; y < s.rows; y++ {
-		b.WriteString(s.renderStyledRow(y, true))
-		if y < s.rows-1 {
-			b.WriteByte('\n')
-		}
-	}
-	return b.String()
-}
-
-func (s Surface) renderStyledRow(y int, squareWide bool) string {
+func (s Surface) renderStyledRow(y int) string {
 	var b strings.Builder
 	var run strings.Builder
 	current := surfaceStyle{}
@@ -143,50 +104,9 @@ func (s Surface) renderStyledRow(y int, squareWide bool) string {
 			run.Reset()
 			current = next
 		}
-		if squareWide {
-			left, right := squareWideGlyph(cell.ch)
-			run.WriteString(left)
-			run.WriteString(right)
-		} else {
-			run.WriteString(cell.ch)
-		}
+		run.WriteString(cell.ch)
 	}
 	b.WriteString(renderCellRun(run.String(), current))
-	return b.String()
-}
-
-func (s Surface) renderSquareHalf() string {
-	var b strings.Builder
-	for y := 0; y < s.terminalRows; y++ {
-		var run strings.Builder
-		current := surfaceStyle{}
-		for x := 0; x < s.cols; x++ {
-			top := s.cellAt(x, y*2)
-			bottom := s.cellAt(x, y*2+1)
-			ch := "▀"
-			next := surfaceStyle{fg: top.bg, bg: bottom.bg, bold: false}
-			if top.ch != " " {
-				ch = top.ch
-				next = surfaceStyle{fg: top.fg, bg: top.bg, bold: top.bold}
-			} else if bottom.ch != " " {
-				ch = bottom.ch
-				next = surfaceStyle{fg: bottom.fg, bg: bottom.bg, bold: bottom.bold}
-			}
-			if x == 0 {
-				current = next
-			}
-			if next != current {
-				b.WriteString(renderCellRun(run.String(), current))
-				run.Reset()
-				current = next
-			}
-			run.WriteString(ch)
-		}
-		b.WriteString(renderCellRun(run.String(), current))
-		if y < s.terminalRows-1 {
-			b.WriteByte('\n')
-		}
-	}
 	return b.String()
 }
 
@@ -205,31 +125,6 @@ func (s *Surface) clear() {
 	for i := range s.cells {
 		s.cells[i] = surfaceCell{ch: " ", fg: "#cbd5e1", bg: "#020617"}
 	}
-}
-
-func (s Surface) logicalSize(cols, rows int) (int, int) {
-	switch s.render.CellAspect {
-	case ggp.CellAspectSquareWide:
-		return max(cols/2, 1), rows
-	case ggp.CellAspectSquareHalf:
-		return cols, rows * 2
-	default:
-		return cols, rows
-	}
-}
-
-func (s Surface) cellAt(x, y int) surfaceCell {
-	if x < 0 || y < 0 || x >= s.cols || y >= s.rows {
-		return surfaceCell{ch: " ", fg: "#cbd5e1", bg: "#020617"}
-	}
-	return s.cells[y*s.cols+x]
-}
-
-func squareWideGlyph(ch string) (string, string) {
-	if ch == "" || ch == " " {
-		return " ", " "
-	}
-	return ch, " "
 }
 
 func firstRune(value string) string {

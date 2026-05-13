@@ -162,7 +162,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.event.Ready != nil {
 			m.gameTitle = msg.event.Ready.Title
 			m.gameStatus = "ready"
-			m.surface.SetRender(RenderMode{Mode: msg.event.Ready.Render.Mode, CellAspect: msg.event.Ready.Render.CellAspect})
 			if m.gameClient != nil {
 				cols, rows := m.surface.Viewport()
 				_ = m.gameClient.SendResize(cols, rows)
@@ -431,7 +430,6 @@ func connectGameCmd(db *store.Store, player store.Player, game store.Game, cols,
 			Viewport: ggp.Viewport{Cols: cols, Rows: rows},
 			Capabilities: []string{
 				ggp.CapRenderCell,
-				ggp.CapRenderSquare,
 				ggp.CapInputKeyboard,
 				ggp.CapChatBridge,
 			},

@@ -91,7 +91,7 @@ func handleGGP(w http.ResponseWriter, r *http.Request) {
 	s := &session{
 		conn:    conn,
 		player:  hello.Player.Name,
-		cols:    max(hello.Viewport.Cols/2, 40),
+		cols:    max(hello.Viewport.Cols, 40),
 		rows:    max(hello.Viewport.Rows, 14),
 		x:       88,
 		y:       38,
@@ -102,8 +102,7 @@ func handleGGP(w http.ResponseWriter, r *http.Request) {
 		Type:         ggp.TypeReady,
 		Title:        "Meadow Village",
 		TargetFPS:    8,
-		Capabilities: []string{ggp.CapRenderCell, ggp.CapRenderSquare, ggp.CapInputKeyboard},
-		Render:       ggp.Render{Mode: ggp.RenderModeCells, CellAspect: ggp.CellAspectSquareWide},
+		Capabilities: []string{ggp.CapRenderCell, ggp.CapInputKeyboard},
 	})
 	s.sendFrame()
 
