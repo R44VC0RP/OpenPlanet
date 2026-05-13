@@ -567,6 +567,11 @@ func (m Model) handleChatKey(key string) (tea.Model, tea.Cmd) {
 	case "backspace", "ctrl+h":
 		m.chatInput = dropLastRune(m.chatInput)
 		return m, nil
+	case "space":
+		if len([]rune(m.chatInput)) < 240 {
+			m.chatInput += " "
+		}
+		return m, nil
 	}
 
 	if isPrintableKey(key) && len([]rune(m.chatInput)) < 240 {
