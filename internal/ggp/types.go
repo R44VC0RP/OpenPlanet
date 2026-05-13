@@ -7,6 +7,7 @@ const (
 	CapInputKeyboard = "input.keyboard.v1"
 	CapInputMouse    = "input.mouse.v1"
 	CapChatBridge    = "chat.bridge.v1"
+	CapScoreReport   = "score.report.v1"
 
 	TypeHello  = "hello"
 	TypeReady  = "ready"
@@ -14,6 +15,7 @@ const (
 	TypeInput  = "input"
 	TypeResize = "resize"
 	TypeFocus  = "focus"
+	TypeScore  = "score"
 	TypeError  = "error"
 
 	FrameFull  = "full"
@@ -67,6 +69,11 @@ type Frame struct {
 	Mode   string `json:"mode"`
 	Status string `json:"status,omitempty"`
 	Cells  []Cell `json:"cells"`
+}
+
+type Score struct {
+	Type  string `json:"type"`
+	Value int64  `json:"value"`
 }
 
 type Input struct {

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"hash/fnv"
+	"strconv"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -101,10 +102,17 @@ func (m Model) renderGame() string {
 		return game
 	}
 
-	overlayWidth := min(max(36, m.width/3), max(panelWidth-4, 20))
 	overlayHeight := max(panelHeight-4, 8)
-	overlay := panelBorder.BorderForeground(lipgloss.Color("#facc15")).Width(overlayWidth).Height(overlayHeight).Render(m.renderChat(max(overlayWidth-4, 1), max(overlayHeight-2, 1)))
-	return overlaySidebar(game, overlay, 2, 2)
+	maxOverlayWidth := max((panelWidth-6)/2, 18)
+	leaderboardWidth := min(max(30, m.width/4), maxOverlayWidth)
+	chatWidth := min(max(36, m.width/3), maxOverlayWidth)
+
+	leaderboard := panelBorder.BorderForeground(lipgloss.Color("#38bdf8")).Width(leaderboardWidth).Height(overlayHeight).Render(m.renderLeaderboard(max(leaderboardWidth-4, 1), max(overlayHeight-2, 1)))
+	game = overlayAt(game, leaderboard, 2, 2)
+
+	chatLeft := max(maxLineWidth(strings.Split(game, "\n"))-chatWidth-2, 0)
+	chat := panelBorder.BorderForeground(lipgloss.Color("#facc15")).Width(chatWidth).Height(overlayHeight).Render(m.renderChat(max(chatWidth-4, 1), max(overlayHeight-2, 1)))
+	return overlayAt(game, chat, 2, chatLeft)
 }
 
 func (m Model) renderGamePanel(width, height int) string {
@@ -137,6 +145,31 @@ func (m Model) renderChat(width, height int) string {
 	return cropLines(b.String(), width, height)
 }
 
+func (m Model) renderLeaderboard(width, height int) string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("Leaderboard"))
+	b.WriteString("\n")
+
+	available := max(height-2, 1)
+	if len(m.leaderboard) == 0 {
+		b.WriteString(mutedStyle.Render("No scores yet."))
+		b.WriteString("\n")
+	} else {
+		for i, entry := range m.leaderboard[:min(len(m.leaderboard), available)] {
+			rank := mutedStyle.Render(strconv.Itoa(i+1) + ". ")
+			name := chatNameStyle(entry.DisplayName).Render(entry.DisplayName)
+			score := focusStyle.Render(strconv.FormatInt(entry.Score, 10))
+			b.WriteString(fitLine(rank+name+" "+score, width))
+			b.WriteString("\n")
+		}
+	}
+
+	for lines := countLines(b.String()); lines < height; lines++ {
+		b.WriteString("\n")
+	}
+	return cropLines(b.String(), width, height)
+}
+
 func (m Model) renderError() string {
 	return panelBorder.Width(max(m.width-4, 40)).Padding(1, 2).Render(
 		errorStyle.Render(m.errorTitle) + "\n\n" + m.errorText + "\n\nPress esc to return to the gateway.",
@@ -158,12 +191,11 @@ func overlayBottom(base, overlay string) string {
 	return strings.Join(baseLines, "\n")
 }
 
-func overlaySidebar(base, overlay string, topPad, rightPad int) string {
+func overlayAt(base, overlay string, topPad, leftPad int) string {
 	baseLines := strings.Split(base, "\n")
 	overlayLines := strings.Split(overlay, "\n")
 	totalWidth := maxLineWidth(baseLines)
 	overlayWidth := maxLineWidth(overlayLines)
-	leftPad := max(totalWidth-rightPad-overlayWidth, 0)
 
 	for i, line := range overlayLines {
 		idx := topPad + i
@@ -171,7 +203,8 @@ func overlaySidebar(base, overlay string, topPad, rightPad int) string {
 			break
 		}
 		prefix := visiblePrefix(baseLines[idx], leftPad)
-		baseLines[idx] = prefix + strings.Repeat(" ", max(leftPad-lipgloss.Width(prefix), 0)) + line + strings.Repeat(" ", max(totalWidth-leftPad-overlayWidth, 0))
+		suffix := visibleSuffix(baseLines[idx], leftPad+overlayWidth)
+		baseLines[idx] = prefix + strings.Repeat(" ", max(leftPad-lipgloss.Width(prefix), 0)) + line + suffix + strings.Repeat(" ", max(totalWidth-leftPad-overlayWidth-lipgloss.Width(suffix), 0))
 	}
 	return strings.Join(baseLines, "\n")
 }
@@ -214,6 +247,43 @@ func visiblePrefix(value string, width int) string {
 		b.WriteString("\x1b[0m")
 	}
 	return b.String()
+}
+
+func visibleSuffix(value string, start int) string {
+	if start <= 0 {
+		return value
+	}
+	var b strings.Builder
+	visible := 0
+	inEscape := false
+	keep := false
+	for _, r := range value {
+		if r == '\x1b' {
+			inEscape = true
+			if keep {
+				b.WriteRune(r)
+			}
+			continue
+		}
+		if inEscape {
+			if keep {
+				b.WriteRune(r)
+			}
+			if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') {
+				inEscape = false
+			}
+			continue
+		}
+		if visible >= start {
+			keep = true
+			b.WriteRune(r)
+		}
+		visible++
+	}
+	if b.Len() == 0 {
+		return ""
+	}
+	return "\x1b[0m" + b.String()
 }
 
 func renderChatMessage(name, body string) string {

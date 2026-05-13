@@ -15,6 +15,7 @@ import (
 type Event struct {
 	Ready *Ready
 	Frame *Frame
+	Score *Score
 	Error error
 }
 
@@ -122,6 +123,13 @@ func (c *Client) readLoop() {
 				continue
 			}
 			c.emit(Event{Frame: &frame})
+		case TypeScore:
+			var score Score
+			if err := json.Unmarshal(payload, &score); err != nil {
+				c.emit(Event{Error: err})
+				continue
+			}
+			c.emit(Event{Score: &score})
 		case TypeError:
 			var gameErr Error
 			if err := json.Unmarshal(payload, &gameErr); err != nil {

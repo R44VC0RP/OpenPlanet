@@ -16,7 +16,7 @@ Gateway sends `hello` with the terminal-cell viewport currently available for th
   "roomId": "game:lobby",
   "player": { "id": "...", "name": "ryan", "sshKeyFingerprint": "SHA256:..." },
   "viewport": { "cols": 120, "rows": 36 },
-  "capabilities": ["render.cell.v1", "input.keyboard.v1", "chat.bridge.v1"]
+  "capabilities": ["render.cell.v1", "input.keyboard.v1", "chat.bridge.v1", "score.report.v1"]
 }
 ```
 
@@ -27,7 +27,7 @@ Game replies with `ready`:
   "type": "ready",
   "title": "Meadow Village",
   "targetFps": 8,
-  "capabilities": ["render.cell.v1", "input.keyboard.v1"]
+  "capabilities": ["render.cell.v1", "input.keyboard.v1", "score.report.v1"]
 }
 ```
 
@@ -71,6 +71,16 @@ Supported cell fields:
 | `attrs` | Optional attributes, currently `bold` |
 
 Use `status` for player-facing text that should be rendered by the gateway outside the cell grid.
+
+## Scores
+
+Games can report the current player's score when the gateway advertises `score.report.v1`:
+
+```json
+{ "type": "score", "value": 4200 }
+```
+
+The gateway stores the player's best score for the active game and shows the leaderboard alongside chat. Higher scores rank first.
 
 ## Input
 

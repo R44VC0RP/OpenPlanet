@@ -57,6 +57,7 @@ type Model struct {
 	chatOpen    bool
 	exitArmed   bool
 	messages    []store.ChatMessage
+	leaderboard []store.LeaderboardEntry
 	unsubscribe func()
 	chatEvents  <-chan store.ChatMessage
 	errorTitle  string
@@ -70,10 +71,11 @@ type ErrorModel struct {
 }
 
 type gameConnectedMsg struct {
-	game   store.Game
-	roomID string
-	client *ggp.Client
-	chats  []store.ChatMessage
+	game        store.Game
+	roomID      string
+	client      *ggp.Client
+	chats       []store.ChatMessage
+	leaderboard []store.LeaderboardEntry
 }
 
 type gameEventMsg struct{ event ggp.Event }
@@ -81,6 +83,8 @@ type gameDisconnectedMsg struct{}
 type chatMsg struct{ message store.ChatMessage }
 type chatClosedMsg struct{}
 type chatPostedMsg struct{}
+type leaderboardLoadedMsg struct{ entries []store.LeaderboardEntry }
+type leaderboardFailedMsg struct{ err error }
 type nameSavedMsg struct{ player store.Player }
 type nameSaveFailedMsg struct{ err error }
 type connectFailedMsg struct{ err error }
@@ -140,6 +144,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.roomID = msg.roomID
 		m.gameClient = msg.client
 		m.messages = msg.chats
+		m.leaderboard = msg.leaderboard
 		m.mode = modeGame
 		m.chatOpen = false
 		m.exitArmed = false
@@ -167,13 +172,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.gameMessage = msg.event.Frame.Status
 			}
 		}
+		var scoreCmd tea.Cmd
+		if msg.event.Score != nil && m.activeGame != nil {
+			scoreCmd = recordScoreCmd(m.store, m.player, m.activeGame.ID, msg.event.Score.Value)
+		}
 		if msg.event.Error != nil {
 			m.gameStatus = "game disconnected: " + msg.event.Error.Error()
 		}
 		if m.gameClient == nil {
-			return m, nil
+			return m, scoreCmd
 		}
-		return m, waitGameEvent(m.gameClient.Events)
+		return m, tea.Batch(waitGameEvent(m.gameClient.Events), scoreCmd)
 	case gameDisconnectedMsg:
 		m.gameStatus = "game disconnected"
 		return m, nil
@@ -189,6 +198,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case chatPostFailedMsg:
 		m.gameStatus = "chat failed: " + msg.err.Error()
+		return m, nil
+	case leaderboardLoadedMsg:
+		m.leaderboard = msg.entries
+		return m, nil
+	case leaderboardFailedMsg:
+		m.gameStatus = "leaderboard failed: " + msg.err.Error()
 		return m, nil
 	}
 	return m, nil
@@ -412,6 +427,7 @@ func (m *Model) closeActiveGame() {
 	m.chatOpen = false
 	m.exitArmed = false
 	m.messages = nil
+	m.leaderboard = nil
 }
 
 func connectGameCmd(db *store.Store, player store.Player, game store.Game, cols, rows int) tea.Cmd {
@@ -425,6 +441,11 @@ func connectGameCmd(db *store.Store, player store.Player, game store.Game, cols,
 		}
 
 		chats, err := db.RecentChat(ctx, roomID, 50)
+		if err != nil {
+			return connectFailedMsg{err: err}
+		}
+
+		leaderboard, err := db.Leaderboard(ctx, game.ID, 10)
 		if err != nil {
 			return connectFailedMsg{err: err}
 		}
@@ -444,13 +465,14 @@ func connectGameCmd(db *store.Store, player store.Player, game store.Game, cols,
 				ggp.CapRenderCell,
 				ggp.CapInputKeyboard,
 				ggp.CapChatBridge,
+				ggp.CapScoreReport,
 			},
 		})
 		if err != nil {
 			return connectFailedMsg{err: err}
 		}
 
-		return gameConnectedMsg{game: game, roomID: roomID, client: client, chats: chats}
+		return gameConnectedMsg{game: game, roomID: roomID, client: client, chats: chats, leaderboard: leaderboard}
 	}
 }
 
@@ -484,6 +506,21 @@ func postChatCmd(db *store.Store, hub *chat.Hub, roomID string, player store.Pla
 		}
 		hub.Publish(msg)
 		return chatPostedMsg{}
+	}
+}
+
+func recordScoreCmd(db *store.Store, player store.Player, gameID string, value int64) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := db.UpsertScore(ctx, gameID, player, value); err != nil {
+			return leaderboardFailedMsg{err: err}
+		}
+		entries, err := db.Leaderboard(ctx, gameID, 10)
+		if err != nil {
+			return leaderboardFailedMsg{err: err}
+		}
+		return leaderboardLoadedMsg{entries: entries}
 	}
 }
 

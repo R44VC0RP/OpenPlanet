@@ -46,6 +46,14 @@ type ChatMessage struct {
 	CreatedAt   time.Time
 }
 
+type LeaderboardEntry struct {
+	GameID      string
+	PlayerID    string
+	DisplayName string
+	Score       int64
+	UpdatedAt   time.Time
+}
+
 func Open(ctx context.Context, databaseURL string) (*Store, error) {
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
@@ -263,6 +271,45 @@ func (s *Store) InsertChat(ctx context.Context, roomID string, player Player, bo
 	return msg, err
 }
 
+func (s *Store) UpsertScore(ctx context.Context, gameID string, player Player, score int64) error {
+	_, err := s.pool.Exec(ctx, `
+		insert into leaderboard_scores (game_id, player_id, display_name, score)
+		values ($1, $2, $3, $4)
+		on conflict (game_id, player_id) do update set
+			display_name = excluded.display_name,
+			score = greatest(leaderboard_scores.score, excluded.score),
+			updated_at = case
+				when excluded.score > leaderboard_scores.score then now()
+				else leaderboard_scores.updated_at
+			end
+	`, gameID, player.ID, player.DisplayName, score)
+	return err
+}
+
+func (s *Store) Leaderboard(ctx context.Context, gameID string, limit int) ([]LeaderboardEntry, error) {
+	rows, err := s.pool.Query(ctx, `
+		select game_id, player_id::text, display_name, score, updated_at
+		from leaderboard_scores
+		where game_id = $1
+		order by score desc, updated_at asc
+		limit $2
+	`, gameID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []LeaderboardEntry
+	for rows.Next() {
+		var entry LeaderboardEntry
+		if err := rows.Scan(&entry.GameID, &entry.PlayerID, &entry.DisplayName, &entry.Score, &entry.UpdatedAt); err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
 func cleanDisplayName(value string) string {
 	var b strings.Builder
 	for _, r := range strings.TrimSpace(value) {
@@ -467,5 +514,16 @@ create table if not exists chat_messages (
   created_at timestamptz not null default now()
 );
 
+create table if not exists leaderboard_scores (
+  game_id text not null references games(id) on delete cascade,
+  player_id uuid not null references players(id) on delete cascade,
+  display_name text not null,
+  score bigint not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  primary key (game_id, player_id)
+);
+
 create index if not exists chat_messages_room_id_id_idx on chat_messages(room_id, id desc);
+create index if not exists leaderboard_scores_game_id_score_idx on leaderboard_scores(game_id, score desc, updated_at asc);
 `
