@@ -51,6 +51,35 @@ func (m Model) renderMenu() string {
 	return panelBorder.Width(max(m.width-4, 40)).Height(max(m.height-2, 12)).Padding(1, 2).Render(b.String())
 }
 
+func (m Model) renderName() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("Choose Your Name"))
+	b.WriteString("\n\n")
+	b.WriteString("This name appears in chat and games. It must be unique.\n")
+	b.WriteString("Only letters and numbers are allowed, up to 12 characters.\n\n")
+	b.WriteString(mutedStyle.Render("Generated name:"))
+	b.WriteString(" ")
+	b.WriteString(goodStyle.Render(m.player.DisplayName))
+	b.WriteString("\n\n")
+	b.WriteString("Name: ")
+	b.WriteString(focusStyle.Render(m.nameInput + "_"))
+	b.WriteString("\n")
+	if m.nameError != "" {
+		b.WriteString(errorStyle.Render(m.nameError))
+		b.WriteString("\n")
+	} else if m.nameSaving {
+		b.WriteString(mutedStyle.Render("Saving name..."))
+		b.WriteString("\n")
+	} else {
+		b.WriteString(mutedStyle.Render("Press Enter to accept or save. Backspace edits."))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render("If your chosen name is taken, a number will be appended automatically."))
+
+	return panelBorder.Width(max(m.width-4, 50)).Height(max(m.height-2, 14)).Padding(1, 2).Render(b.String())
+}
+
 func (m Model) renderGame() string {
 	if m.width < 100 {
 		return m.renderCompactGame()

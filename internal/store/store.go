@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,9 +19,10 @@ type Store struct {
 }
 
 type Player struct {
-	ID          string
-	DisplayName string
-	Fingerprint string
+	ID            string
+	DisplayName   string
+	Fingerprint   string
+	NameConfirmed bool
 }
 
 type Game struct {
@@ -61,8 +63,10 @@ func (s *Store) Close() {
 }
 
 func (s *Store) Migrate(ctx context.Context) error {
-	_, err := s.pool.Exec(ctx, schemaSQL)
-	return err
+	if _, err := s.pool.Exec(ctx, schemaSQL); err != nil {
+		return err
+	}
+	return s.migratePlayerNames(ctx)
 }
 
 func (s *Store) SeedSampleGame(ctx context.Context, endpointURL string) error {
@@ -92,23 +96,27 @@ func (s *Store) EnsurePlayer(ctx context.Context, key identity.KeyInfo) (Player,
 
 	var player Player
 	err = tx.QueryRow(ctx, `
-		select p.id::text, p.display_name, k.fingerprint
+		select p.id::text, p.display_name, k.fingerprint, p.name_confirmed
 		from ssh_keys k
 		join players p on p.id = k.player_id
 		where k.fingerprint = $1 and k.revoked_at is null
-	`, key.Fingerprint).Scan(&player.ID, &player.DisplayName, &player.Fingerprint)
+	`, key.Fingerprint).Scan(&player.ID, &player.DisplayName, &player.Fingerprint, &player.NameConfirmed)
 
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return Player{}, err
 	}
 
 	if errors.Is(err, pgx.ErrNoRows) {
-		displayName := cleanDisplayName(key.Username)
+		displayName, err := nextAvailableDisplayName(ctx, tx, cleanDisplayName(key.Username), "")
+		if err != nil {
+			return Player{}, err
+		}
+
 		err = tx.QueryRow(ctx, `
-			insert into players (display_name)
-			values ($1)
-			returning id::text, display_name
-		`, displayName).Scan(&player.ID, &player.DisplayName)
+			insert into players (display_name, name_confirmed)
+			values ($1, false)
+			returning id::text, display_name, name_confirmed
+		`, displayName).Scan(&player.ID, &player.DisplayName, &player.NameConfirmed)
 		if err != nil {
 			return Player{}, err
 		}
@@ -133,6 +141,39 @@ func (s *Store) EnsurePlayer(ctx context.Context, key identity.KeyInfo) (Player,
 	_, err = tx.Exec(ctx, `
 		update ssh_keys set last_seen_at = now() where fingerprint = $1
 	`, key.Fingerprint)
+	if err != nil {
+		return Player{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return Player{}, err
+	}
+	return player, nil
+}
+
+func (s *Store) UpdatePlayerDisplayName(ctx context.Context, player Player, requested string) (Player, error) {
+	requested = strings.TrimSpace(requested)
+	if err := validateDisplayName(requested); err != nil {
+		return Player{}, err
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Player{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	displayName, err := nextAvailableDisplayName(ctx, tx, requested, player.ID)
+	if err != nil {
+		return Player{}, err
+	}
+
+	err = tx.QueryRow(ctx, `
+		update players
+		set display_name = $1, name_confirmed = true, last_seen_at = now()
+		where id = $2
+		returning id::text, display_name, name_confirmed
+	`, displayName, player.ID).Scan(&player.ID, &player.DisplayName, &player.NameConfirmed)
 	if err != nil {
 		return Player{}, err
 	}
@@ -223,20 +264,164 @@ func (s *Store) InsertChat(ctx context.Context, roomID string, player Player, bo
 }
 
 func cleanDisplayName(value string) string {
-	value = strings.TrimSpace(value)
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(value) {
+		if isASCIIAlphaNumeric(r) {
+			b.WriteRune(r)
+		}
+	}
+	cleaned := b.String()
+	if cleaned == "" {
+		cleaned = "traveler"
+	}
+	if len(cleaned) > 12 {
+		return cleaned[:12]
+	}
+	return cleaned
+}
+
+func validateDisplayName(value string) error {
 	if value == "" {
-		return "traveler"
+		return errors.New("name is required")
 	}
-	if len(value) > 32 {
-		return value[:32]
+	if len(value) > 12 {
+		return errors.New("name must be 12 characters or fewer")
 	}
-	return value
+	for _, r := range value {
+		if !isASCIIAlphaNumeric(r) {
+			return errors.New("name can only contain letters and numbers")
+		}
+	}
+	return nil
+}
+
+func nextAvailableDisplayName(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, base string, excludePlayerID string) (string, error) {
+	base = cleanDisplayName(base)
+	for i := 0; i < 10000; i++ {
+		candidate := candidateDisplayName(base, i)
+		var exists bool
+		err := q.QueryRow(ctx, `
+			select exists(
+				select 1
+				from players
+				where lower(display_name) = lower($1)
+				and ($2 = '' or id::text <> $2)
+			)
+		`, candidate, excludePlayerID).Scan(&exists)
+		if err != nil {
+			return "", err
+		}
+		if !exists {
+			return candidate, nil
+		}
+	}
+	return "", errors.New("could not find an available name")
+}
+
+func candidateDisplayName(base string, attempt int) string {
+	base = cleanDisplayName(base)
+	if attempt == 0 {
+		return base
+	}
+	suffix := strconv.Itoa(attempt)
+	if len(suffix) >= 12 {
+		return suffix[len(suffix)-12:]
+	}
+	prefixLen := 12 - len(suffix)
+	if len(base) > prefixLen {
+		base = base[:prefixLen]
+	}
+	return base + suffix
+}
+
+func isASCIIAlphaNumeric(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+}
+
+func (s *Store) migratePlayerNames(ctx context.Context) error {
+	if _, err := s.pool.Exec(ctx, `
+		alter table players add column if not exists name_confirmed boolean not null default false
+	`); err != nil {
+		return err
+	}
+
+	rows, err := s.pool.Query(ctx, `select id::text, display_name from players order by created_at, id`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type existingPlayer struct {
+		id   string
+		name string
+	}
+	var players []existingPlayer
+	for rows.Next() {
+		var player existingPlayer
+		if err := rows.Scan(&player.id, &player.name); err != nil {
+			return err
+		}
+		players = append(players, player)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	used := make(map[string]struct{}, len(players))
+	for _, player := range players {
+		base := cleanDisplayName(player.name)
+		name := ""
+		for i := 0; i < 10000; i++ {
+			candidate := candidateDisplayName(base, i)
+			key := strings.ToLower(candidate)
+			if _, ok := used[key]; ok {
+				continue
+			}
+			used[key] = struct{}{}
+			name = candidate
+			break
+		}
+		if name == "" {
+			return errors.New("could not normalize existing player names")
+		}
+		if _, err := s.pool.Exec(ctx, `update players set display_name = $1 where id = $2`, name, player.id); err != nil {
+			return err
+		}
+	}
+
+	if _, err := s.pool.Exec(ctx, `
+		alter table players alter column display_name type varchar(12) using left(display_name, 12)
+	`); err != nil {
+		return err
+	}
+
+	var hasConstraint bool
+	if err := s.pool.QueryRow(ctx, `
+		select exists(select 1 from pg_constraint where conname = 'players_display_name_alnum_check')
+	`).Scan(&hasConstraint); err != nil {
+		return err
+	}
+	if !hasConstraint {
+		if _, err := s.pool.Exec(ctx, `
+			alter table players add constraint players_display_name_alnum_check check (display_name ~ '^[A-Za-z0-9]{1,12}$')
+		`); err != nil {
+			return err
+		}
+	}
+
+	_, err = s.pool.Exec(ctx, `
+		create unique index if not exists players_display_name_lower_idx on players (lower(display_name))
+	`)
+	return err
 }
 
 const schemaSQL = `
 create table if not exists players (
   id uuid primary key default gen_random_uuid(),
-  display_name text not null,
+  display_name varchar(12) not null,
+  name_confirmed boolean not null default false,
   created_at timestamptz not null default now(),
   last_seen_at timestamptz not null default now()
 );

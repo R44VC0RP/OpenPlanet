@@ -33,7 +33,8 @@ const (
 type viewMode int
 
 const (
-	modeMenu viewMode = iota
+	modeName viewMode = iota
+	modeMenu
 	modeGame
 	modeError
 )
@@ -44,11 +45,14 @@ type Model struct {
 	store  *store.Store
 	hub    *chat.Hub
 
-	width    int
-	height   int
-	mode     viewMode
-	selected int
-	focus    focusArea
+	width      int
+	height     int
+	mode       viewMode
+	selected   int
+	focus      focusArea
+	nameInput  string
+	nameError  string
+	nameSaving bool
 
 	roomID      string
 	activeGame  *store.Game
@@ -83,19 +87,26 @@ type gameDisconnectedMsg struct{}
 type chatMsg struct{ message store.ChatMessage }
 type chatClosedMsg struct{}
 type chatPostedMsg struct{}
+type nameSavedMsg struct{ player store.Player }
+type nameSaveFailedMsg struct{ err error }
 type connectFailedMsg struct{ err error }
 type chatPostFailedMsg struct{ err error }
 
 func NewModel(cfg ModelConfig) Model {
+	mode := modeMenu
+	if !cfg.Player.NameConfirmed {
+		mode = modeName
+	}
 	return Model{
-		player: cfg.Player,
-		games:  cfg.Games,
-		store:  cfg.Store,
-		hub:    cfg.Hub,
-		width:  max(cfg.Width, 80),
-		height: max(cfg.Height, 24),
-		mode:   modeMenu,
-		focus:  focusGame,
+		player:    cfg.Player,
+		games:     cfg.Games,
+		store:     cfg.Store,
+		hub:       cfg.Hub,
+		width:     max(cfg.Width, 80),
+		height:    max(cfg.Height, 24),
+		mode:      mode,
+		focus:     focusGame,
+		nameInput: cfg.Player.DisplayName,
 	}
 }
 
@@ -120,6 +131,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
+	case nameSavedMsg:
+		m.player = msg.player
+		m.nameInput = msg.player.DisplayName
+		m.nameError = ""
+		m.nameSaving = false
+		m.mode = modeMenu
+		return m, nil
+	case nameSaveFailedMsg:
+		m.nameError = msg.err.Error()
+		m.nameSaving = false
+		return m, nil
 	case gameConnectedMsg:
 		m.activeGame = &msg.game
 		m.roomID = msg.roomID
@@ -181,6 +203,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) View() tea.View {
 	switch m.mode {
+	case modeName:
+		view := tea.NewView(m.renderName())
+		view.AltScreen = true
+		return view
 	case modeError:
 		return tea.NewView(m.renderError())
 	case modeGame:
@@ -218,6 +244,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch m.mode {
+	case modeName:
+		return m.handleNameKey(key)
 	case modeMenu:
 		return m.handleMenuKey(key)
 	case modeGame:
@@ -226,6 +254,41 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if key == "esc" || key == "q" {
 			m.mode = modeMenu
 		}
+	}
+	return m, nil
+}
+
+func (m Model) handleNameKey(key string) (tea.Model, tea.Cmd) {
+	if m.nameSaving {
+		return m, nil
+	}
+
+	switch key {
+	case "enter":
+		name := strings.TrimSpace(m.nameInput)
+		if name == "" {
+			m.nameError = "Name is required. Use letters and numbers only."
+			return m, nil
+		}
+		m.nameSaving = true
+		m.nameError = ""
+		return m, saveNameCmd(m.store, m.player, name)
+	case "backspace", "ctrl+h":
+		m.nameInput = dropLastRune(m.nameInput)
+		m.nameError = ""
+		return m, nil
+	}
+
+	if isNameKey(key) {
+		if len(m.nameInput) < 12 {
+			m.nameInput += key
+			m.nameError = ""
+		}
+		return m, nil
+	}
+
+	if isPrintableKey(key) {
+		m.nameError = "Only letters and numbers are allowed."
 	}
 	return m, nil
 }
@@ -412,6 +475,26 @@ func postChatCmd(db *store.Store, hub *chat.Hub, roomID string, player store.Pla
 		hub.Publish(msg)
 		return chatPostedMsg{}
 	}
+}
+
+func saveNameCmd(db *store.Store, player store.Player, name string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		updated, err := db.UpdatePlayerDisplayName(ctx, player, name)
+		if err != nil {
+			return nameSaveFailedMsg{err: err}
+		}
+		return nameSavedMsg{player: updated}
+	}
+}
+
+func isNameKey(key string) bool {
+	if len(key) != 1 {
+		return false
+	}
+	r := rune(key[0])
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
 }
 
 func isPrintableKey(key string) bool {
