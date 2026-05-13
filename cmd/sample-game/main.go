@@ -87,16 +87,18 @@ type lootItem struct {
 }
 
 type session struct {
-	conn      *websocket.Conn
-	room      *room
-	playerID  string
-	cols      int
-	rows      int
-	seq       int
-	message   string
-	lastScore int64
-	scoreSent bool
-	mu        sync.Mutex
+	conn       *websocket.Conn
+	room       *room
+	playerID   string
+	cols       int
+	rows       int
+	seq        int
+	message    string
+	lastCells  []ggp.Cell
+	lastStatus string
+	lastScore  int64
+	scoreSent  bool
+	mu         sync.Mutex
 }
 
 type house struct {
@@ -376,8 +378,7 @@ func (s *session) handleMessage(payload []byte) bool {
 		if err := json.Unmarshal(payload, &resize); err != nil {
 			return true
 		}
-		s.cols = max(resize.Cols, 40)
-		s.rows = max(resize.Rows, 14)
+		s.resize(resize.Cols, resize.Rows)
 		_, view := s.room.snapshot()
 		s.sendFrame(view)
 		s.sendScore(view)
@@ -578,6 +579,15 @@ func (r *room) lootAtLocked(x, y int) *lootItem {
 	return nil
 }
 
+func (s *session) resize(cols, rows int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cols = max(cols, 40)
+	s.rows = max(rows, 14)
+	s.lastCells = nil
+	s.lastStatus = ""
+}
+
 func (r *room) occupiedLocked(playerID string, x, y int) bool {
 	for id, player := range r.players {
 		if id != playerID && player.x == x && player.y == y {
@@ -635,17 +645,31 @@ func (r *room) presence(players []actor) ggp.Presence {
 }
 
 func (s *session) sendFrame(view roomView) {
-	frame := ggp.Frame{
-		Type:   ggp.TypeFrame,
-		Mode:   ggp.FrameFull,
-		Status: s.message,
-		Cells:  s.renderCells(view),
-	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cells := s.renderCells(view)
+	status := s.message
+	mode := ggp.FramePatch
+	frameCells := changedCells(s.lastCells, cells)
+	if len(s.lastCells) != len(cells) {
+		mode = ggp.FrameFull
+		frameCells = cells
+	}
+	if len(frameCells) == 0 && status == s.lastStatus {
+		return
+	}
+
+	s.lastCells = cells
+	s.lastStatus = status
 	s.seq++
-	frame.Seq = s.seq
-	s.mu.Unlock()
-	_ = s.writeJSON(frame)
+	_ = s.conn.WriteJSON(ggp.Frame{
+		Type:   ggp.TypeFrame,
+		Seq:    s.seq,
+		Mode:   mode,
+		Status: status,
+		Cells:  frameCells,
+	})
 }
 
 func (s *session) sendScore(view roomView) {
@@ -741,6 +765,31 @@ func writeCells(cells []ggp.Cell, cols, rows, x, y int, text, fg, bg string, att
 		}
 		cells[y*cols+cx] = ggp.Cell{X: cx, Y: y, Ch: string(r), Fg: fg, Bg: bg, Attrs: attrs}
 	}
+}
+
+func changedCells(previous, next []ggp.Cell) []ggp.Cell {
+	if len(previous) != len(next) {
+		return next
+	}
+	changed := make([]ggp.Cell, 0, min(len(next), 256))
+	for i := range next {
+		if !sameCell(previous[i], next[i]) {
+			changed = append(changed, next[i])
+		}
+	}
+	return changed
+}
+
+func sameCell(a, b ggp.Cell) bool {
+	if a.X != b.X || a.Y != b.Y || a.Ch != b.Ch || a.Fg != b.Fg || a.Bg != b.Bg || len(a.Attrs) != len(b.Attrs) {
+		return false
+	}
+	for i := range a.Attrs {
+		if a.Attrs[i] != b.Attrs[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func playerAt(players []actor, x, y int) (actor, bool) {
