@@ -230,7 +230,7 @@ func (m Model) renderGame() string {
 }
 
 func (m Model) renderGamePanel(width, height int) string {
-	view := cropLines(m.surface.Render(), width, height)
+	view := centerBlock(m.surface.Render(), width, height)
 	if m.exitArmed {
 		return overlayBottom(view, fitLine(errorStyle.Render("Press escape again to return to the gateway."), width))
 	}
@@ -423,6 +423,37 @@ func cropLines(value string, width, height int) string {
 		lines[i] = fitLine(lines[i], width)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func centerBlock(value string, width, height int) string {
+	if width < 1 || height < 1 {
+		return ""
+	}
+	lines := strings.Split(value, "\n")
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	contentWidth := min(maxLineWidth(lines), width)
+	topPad := max((height-len(lines))/2, 0)
+	leftPad := max((width-contentWidth)/2, 0)
+	out := make([]string, 0, height)
+	blank := strings.Repeat(" ", width)
+	for len(out) < topPad {
+		out = append(out, blank)
+	}
+	for _, line := range lines {
+		if leftPad > 0 {
+			line = strings.Repeat(" ", leftPad) + line
+		}
+		out = append(out, fitLine(line, width))
+		if len(out) == height {
+			break
+		}
+	}
+	for len(out) < height {
+		out = append(out, blank)
+	}
+	return strings.Join(out, "\n")
 }
 
 func fitLine(value string, width int) string {

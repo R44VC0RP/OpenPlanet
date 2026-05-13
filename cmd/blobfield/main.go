@@ -91,6 +91,8 @@ type session struct {
 	status     string
 	lastCells  []ggp.Cell
 	lastStatus string
+	bestScore  int64
+	scoreAt    time.Time
 	mu         sync.Mutex
 }
 
@@ -172,7 +174,7 @@ func (g *gameServer) handleGGP(w http.ResponseWriter, r *http.Request) {
 		Type:         ggp.TypeReady,
 		Title:        "Blobfield",
 		TargetFPS:    targetFPS,
-		Capabilities: []string{ggp.CapRenderCell, ggp.CapInputKeyboard},
+		Capabilities: []string{ggp.CapRenderCell, ggp.CapInputKeyboard, ggp.CapScoreReport},
 	}
 	if g.secret != "" {
 		ready.Capabilities = append(ready.Capabilities, ggp.CapAuthSession, ggp.CapMultiplayer, ggp.CapPresence)
@@ -565,27 +567,34 @@ func (s *session) sendFrame(state roomState) {
 
 	cells := s.renderCells(state)
 	status := s.statusLine(state)
+	self, ok := state.player(s.playerID)
+	score := scoreForPlayer(self, ok)
+	reportScore := s.shouldReportScoreLocked(score, time.Now())
 	mode := ggp.FramePatch
 	frameCells := changedCells(s.lastCells, cells)
 	if len(s.lastCells) != len(cells) {
 		mode = ggp.FrameFull
 		frameCells = cells
 	}
-	if len(frameCells) == 0 && status == s.lastStatus {
+	sendFrame := len(frameCells) > 0 || status != s.lastStatus
+	if !sendFrame && !reportScore {
 		return
 	}
-	s.lastCells = cells
-	s.lastStatus = status
-	s.seq++
-
-	frame := ggp.Frame{
-		Type:   ggp.TypeFrame,
-		Seq:    s.seq,
-		Mode:   mode,
-		Status: status,
-		Cells:  frameCells,
+	if sendFrame {
+		s.lastCells = cells
+		s.lastStatus = status
+		s.seq++
+		_ = s.conn.WriteJSON(ggp.Frame{
+			Type:   ggp.TypeFrame,
+			Seq:    s.seq,
+			Mode:   mode,
+			Status: status,
+			Cells:  frameCells,
+		})
 	}
-	_ = s.conn.WriteJSON(frame)
+	if reportScore {
+		_ = s.conn.WriteJSON(ggp.Score{Type: ggp.TypeScore, Value: score})
+	}
 }
 
 func (s *session) writeJSON(value any) error {
@@ -759,6 +768,25 @@ func sameCell(a, b ggp.Cell) bool {
 		}
 	}
 	return true
+}
+
+func (s *session) shouldReportScoreLocked(score int64, now time.Time) bool {
+	if score <= s.bestScore || score < int64(startMass) {
+		return false
+	}
+	if score < s.bestScore+5 && now.Sub(s.scoreAt) < 5*time.Second {
+		return false
+	}
+	s.bestScore = score
+	s.scoreAt = now
+	return true
+}
+
+func scoreForPlayer(player blob, ok bool) int64 {
+	if !ok || !player.alive {
+		return 0
+	}
+	return int64(math.Floor(player.mass))
 }
 
 func (state roomState) player(id string) (blob, bool) {
