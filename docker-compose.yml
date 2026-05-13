@@ -1,0 +1,26 @@
+services:
+  sample-game:
+    build:
+      context: .
+      dockerfile: Dockerfile.sample-game
+    environment:
+      PORT: "8081"
+    ports:
+      - "8081:8081"
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
+    env_file:
+      - .env
+    depends_on:
+      sample-game:
+        condition: service_started
+    environment:
+      GATEWAY_HOST: 0.0.0.0
+      GATEWAY_PORT: "2222"
+      HOST_KEY_PATH: /tmp/gamegateway/id_ed25519
+      SAMPLE_GAME_URL: ws://sample-game:8081/ggp
+    ports:
+      - "2222:2222"
