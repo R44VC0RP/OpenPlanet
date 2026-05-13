@@ -88,7 +88,10 @@ func (m Model) renderGamePanel(width, height int) string {
 	b.WriteString("\n")
 	b.WriteString(mutedStyle.Render("tab/ctrl+g: focus chat/game  esc: gateway"))
 	b.WriteString("\n")
-	b.WriteString(m.surface.Render())
+	surfaceHeight := max(height-3, 1)
+	b.WriteString(cropLines(m.surface.Render(), width, surfaceHeight))
+	b.WriteString("\n")
+	b.WriteString(fitLine(focusStyle.Render(m.gameMessage), width))
 
 	return cropLines(b.String(), width, height)
 }

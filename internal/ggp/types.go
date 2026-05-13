@@ -4,6 +4,7 @@ const (
 	ProtocolCellV1 = "ggp.cell.v1"
 
 	CapRenderCell    = "render.cell.v1"
+	CapRenderSquare  = "render.square.v1"
 	CapInputKeyboard = "input.keyboard.v1"
 	CapInputMouse    = "input.mouse.v1"
 	CapChatBridge    = "chat.bridge.v1"
@@ -18,6 +19,12 @@ const (
 
 	FrameFull  = "full"
 	FramePatch = "patch"
+
+	RenderModeCells = "cells"
+
+	CellAspectTerminal   = "terminal"
+	CellAspectSquareWide = "square-wide"
+	CellAspectSquareHalf = "square-half"
 )
 
 type Envelope struct {
@@ -50,6 +57,12 @@ type Ready struct {
 	Title        string   `json:"title"`
 	TargetFPS    int      `json:"targetFps"`
 	Capabilities []string `json:"capabilities"`
+	Render       Render   `json:"render,omitempty"`
+}
+
+type Render struct {
+	Mode       string `json:"mode"`
+	CellAspect string `json:"cellAspect"`
 }
 
 type Cell struct {
@@ -62,10 +75,11 @@ type Cell struct {
 }
 
 type Frame struct {
-	Type  string `json:"type"`
-	Seq   int    `json:"seq"`
-	Mode  string `json:"mode"`
-	Cells []Cell `json:"cells"`
+	Type   string `json:"type"`
+	Seq    int    `json:"seq"`
+	Mode   string `json:"mode"`
+	Status string `json:"status,omitempty"`
+	Cells  []Cell `json:"cells"`
 }
 
 type Input struct {

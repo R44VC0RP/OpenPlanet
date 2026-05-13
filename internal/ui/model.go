@@ -56,6 +56,7 @@ type Model struct {
 	surface     Surface
 	gameTitle   string
 	gameStatus  string
+	gameMessage string
 	chatInput   string
 	messages    []store.ChatMessage
 	unsubscribe func()
@@ -112,7 +113,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeGame {
 			m.resizeSurface()
 			if m.gameClient != nil {
-				_ = m.gameClient.SendResize(m.surface.cols, m.surface.rows)
+				cols, rows := m.surface.Viewport()
+				_ = m.gameClient.SendResize(cols, rows)
 			}
 		}
 		return m, nil
@@ -138,9 +140,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.event.Ready != nil {
 			m.gameTitle = msg.event.Ready.Title
 			m.gameStatus = "ready"
+			m.surface.SetRender(RenderMode{Mode: msg.event.Ready.Render.Mode, CellAspect: msg.event.Ready.Render.CellAspect})
+			if m.gameClient != nil {
+				cols, rows := m.surface.Viewport()
+				_ = m.gameClient.SendResize(cols, rows)
+			}
 		}
 		if msg.event.Frame != nil {
 			m.surface.Apply(*msg.event.Frame)
+			if msg.event.Frame.Status != "" {
+				m.gameMessage = msg.event.Frame.Status
+			}
 		}
 		if msg.event.Error != nil {
 			m.gameStatus = "game disconnected: " + msg.event.Error.Error()
@@ -304,11 +314,14 @@ func (m Model) gameCols() int {
 	if m.width < 100 {
 		return max(m.width-4, 20)
 	}
-	return max(m.width-36, 20)
+	return max(m.width-41, 20)
 }
 
 func (m Model) gameRows() int {
-	return max(m.height-5, 8)
+	if m.width < 100 {
+		return max(m.height-10, 8)
+	}
+	return max(m.height-6, 8)
 }
 
 func (m *Model) closeActiveGame() {
@@ -322,6 +335,7 @@ func (m *Model) closeActiveGame() {
 	}
 	m.activeGame = nil
 	m.gameStatus = ""
+	m.gameMessage = ""
 	m.chatInput = ""
 	m.messages = nil
 }
@@ -354,6 +368,7 @@ func connectGameCmd(db *store.Store, player store.Player, game store.Game, cols,
 			Viewport: ggp.Viewport{Cols: cols, Rows: rows},
 			Capabilities: []string{
 				ggp.CapRenderCell,
+				ggp.CapRenderSquare,
 				ggp.CapInputKeyboard,
 				ggp.CapChatBridge,
 			},

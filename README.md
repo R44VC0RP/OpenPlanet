@@ -42,6 +42,8 @@ ssh -i ~/.ssh/id_ed25519 -p 2222 localhost
 
 ## Game Gateway Protocol
 
+See `docs/ggp-cell-v1.md` for the full protocol, including render aspect modes for terminal cells, square-wide tiles, and square-half-block pixels.
+
 Games expose a WebSocket endpoint and receive a `hello` message:
 
 ```json
