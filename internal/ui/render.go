@@ -50,12 +50,6 @@ func (m Model) renderMenu() string {
 			b.WriteString(mutedStyle.Render("    " + game.Description))
 			b.WriteString("\n")
 			b.WriteString(mutedStyle.Render("    players: " + activePlayerCount(m.activity.Count(game.ID)) + " playing now | capacity: " + playerCapacity(game.MaxPlayers)))
-			b.WriteString("\n")
-			location := game.EndpointURL
-			if game.ImageRef != "" {
-				location = game.ImageRef
-			}
-			b.WriteString(mutedStyle.Render("    " + location))
 			b.WriteString("\n\n")
 		}
 	}
