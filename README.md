@@ -88,7 +88,7 @@ And resize events:
 ## Project Layout
 
 - `cmd/gateway`: SSH gateway server.
-- `cmd/sample-game`: reference WebSocket game endpoint.
+- `cmd/sample-game`: reference WebSocket RPG village endpoint.
 - `internal/ggp`: protocol types and Go client.
 - `internal/ui`: Bubble Tea gateway UI and cell renderer.
 - `internal/store`: Postgres schema and queries.
