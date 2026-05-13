@@ -64,7 +64,7 @@ Game replies with `ready`:
 ```json
 {
   "type": "ready",
-  "title": "Meadow Village",
+  "title": "Meadow Quest",
   "targetFps": 8,
   "capabilities": ["render.cell.v1", "input.keyboard.v1", "score.report.v1", "auth.session-token.v1", "multiplayer.room.v1"],
   "multiplayer": {
@@ -248,7 +248,7 @@ for each input from websocket:
   send frames to affected players
 ```
 
-The sample game in `cmd/sample-game` demonstrates this model. With a configured session secret, Meadow Village becomes a shared room: players see each other, movement is room-authoritative, duplicate active sessions are rejected, and the game rejects forged or replayed tokens.
+The sample game in `cmd/sample-game` demonstrates this model. With a configured session secret, Meadow Quest becomes a shared room: players see each other, combat and loot are room-authoritative, duplicate active sessions are rejected, and the game rejects forged or replayed tokens.
 
 ## Submitting A Game
 

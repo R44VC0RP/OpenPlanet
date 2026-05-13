@@ -171,7 +171,7 @@ func (s *Store) SeedSampleGame(ctx context.Context, endpointURL string, maxPlaye
 			runtime_status = 'running',
 			runtime_error = '',
 			updated_at = now()
-	`, "cell-garden", "Meadow Village", "A tiny multiplayer RPG-style village you can walk around with arrow keys or WASD.", endpointURL, "ggp.cell.v1", 60, 18, maxPlayers, false, sessionSecret)
+	`, "cell-garden", "Meadow Quest", "A multiplayer terminal RPG with monsters, loot, house exploration, potions, and score chasing.", endpointURL, "ggp.cell.v1", 60, 18, maxPlayers, false, sessionSecret)
 	return err
 }
 
