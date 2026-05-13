@@ -23,13 +23,6 @@ type ModelConfig struct {
 	Height int
 }
 
-type focusArea int
-
-const (
-	focusGame focusArea = iota
-	focusChat
-)
-
 type viewMode int
 
 const (
@@ -49,7 +42,6 @@ type Model struct {
 	height     int
 	mode       viewMode
 	selected   int
-	focus      focusArea
 	nameInput  string
 	nameError  string
 	nameSaving bool
@@ -62,6 +54,8 @@ type Model struct {
 	gameStatus  string
 	gameMessage string
 	chatInput   string
+	chatOpen    bool
+	exitArmed   bool
 	messages    []store.ChatMessage
 	unsubscribe func()
 	chatEvents  <-chan store.ChatMessage
@@ -105,7 +99,6 @@ func NewModel(cfg ModelConfig) Model {
 		width:     max(cfg.Width, 80),
 		height:    max(cfg.Height, 24),
 		mode:      mode,
-		focus:     focusGame,
 		nameInput: cfg.Player.DisplayName,
 	}
 }
@@ -148,7 +141,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.gameClient = msg.client
 		m.messages = msg.chats
 		m.mode = modeGame
-		m.focus = focusGame
+		m.chatOpen = false
+		m.exitArmed = false
 		m.gameStatus = "connected"
 		m.resizeSurface()
 		m.chatEvents, m.unsubscribe = m.hub.Subscribe(msg.roomID)
@@ -314,25 +308,31 @@ func (m Model) handleMenuKey(key string) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleGameKey(key string) (tea.Model, tea.Cmd) {
-	switch key {
-	case "esc":
-		m.closeActiveGame()
-		m.mode = modeMenu
-		return m, nil
-	case "tab", "ctrl+g":
-		if m.focus == focusGame {
-			m.focus = focusChat
-			_ = m.gameClient.SendFocus(false)
-		} else {
-			m.focus = focusGame
-			_ = m.gameClient.SendFocus(true)
+	if m.chatOpen {
+		switch key {
+		case "tab", "esc":
+			m.closeChat()
+			return m, nil
+		default:
+			return m.handleChatKey(key)
 		}
+	}
+
+	switch key {
+	case "tab":
+		m.openChat()
+		return m, nil
+	case "esc":
+		if m.exitArmed {
+			m.closeActiveGame()
+			m.mode = modeMenu
+			return m, nil
+		}
+		m.exitArmed = true
 		return m, nil
 	}
 
-	if m.focus == focusChat {
-		return m.handleChatKey(key)
-	}
+	m.exitArmed = false
 	return m.forwardGameKey(key)
 }
 
@@ -373,17 +373,27 @@ func (m *Model) resizeSurface() {
 }
 
 func (m Model) gameCols() int {
-	if m.width < 100 {
-		return max(m.width-4, 20)
-	}
-	return max(m.width-41, 20)
+	return max(m.width-4, 20)
 }
 
 func (m Model) gameRows() int {
-	if m.width < 100 {
-		return max(m.height-10, 8)
+	return max(m.height-4, 8)
+}
+
+func (m *Model) openChat() {
+	m.chatOpen = true
+	m.exitArmed = false
+	if m.gameClient != nil {
+		_ = m.gameClient.SendFocus(false)
 	}
-	return max(m.height-6, 8)
+}
+
+func (m *Model) closeChat() {
+	m.chatOpen = false
+	m.exitArmed = false
+	if m.gameClient != nil {
+		_ = m.gameClient.SendFocus(true)
+	}
 }
 
 func (m *Model) closeActiveGame() {
@@ -399,6 +409,8 @@ func (m *Model) closeActiveGame() {
 	m.gameStatus = ""
 	m.gameMessage = ""
 	m.chatInput = ""
+	m.chatOpen = false
+	m.exitArmed = false
 	m.messages = nil
 }
 

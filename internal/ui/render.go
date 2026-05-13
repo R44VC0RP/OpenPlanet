@@ -1,20 +1,30 @@
 package ui
 
 import (
-	"fmt"
-	"image/color"
+	"hash/fnv"
 	"strings"
 
 	"charm.land/lipgloss/v2"
 )
 
 var (
-	panelBorder = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#334155"))
-	titleStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#7dd3fc")).Bold(true)
-	mutedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#64748b"))
-	goodStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#22c55e"))
-	focusStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#facc15")).Bold(true)
-	errorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#f87171")).Bold(true)
+	panelBorder    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#334155"))
+	titleStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#7dd3fc")).Bold(true)
+	mutedStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#64748b"))
+	goodStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#22c55e"))
+	focusStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#facc15")).Bold(true)
+	errorStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#f87171")).Bold(true)
+	chatNameColors = []string{
+		"#f87171",
+		"#fb923c",
+		"#facc15",
+		"#4ade80",
+		"#2dd4bf",
+		"#38bdf8",
+		"#818cf8",
+		"#c084fc",
+		"#f472b6",
+	}
 )
 
 func (m Model) renderMenu() string {
@@ -81,65 +91,40 @@ func (m Model) renderName() string {
 }
 
 func (m Model) renderGame() string {
-	if m.width < 100 {
-		return m.renderCompactGame()
+	panelWidth := max(m.width-2, 20)
+	panelHeight := max(m.height-2, 12)
+	contentWidth := max(m.width-4, 20)
+	contentHeight := max(m.height-4, 8)
+
+	game := panelBorder.Width(panelWidth).Height(panelHeight).Render(m.renderGamePanel(contentWidth, contentHeight))
+	if !m.chatOpen {
+		return game
 	}
 
-	chatWidth := 32
-	gameWidth := max(m.width-chatWidth-5, 20)
-	height := max(m.height-2, 12)
-
-	chat := panelBorder.BorderForeground(m.borderColor(focusChat)).Width(chatWidth).Height(height).Render(m.renderChat(chatWidth-4, height-2))
-	game := panelBorder.BorderForeground(m.borderColor(focusGame)).Width(gameWidth).Height(height).Render(m.renderGamePanel(gameWidth-4, height-2))
-	return joinColumns(chat, game, " ")
-}
-
-func (m Model) renderCompactGame() string {
-	content := m.renderGamePanel(max(m.width-4, 20), max(m.height-8, 8))
-	footer := m.renderChat(max(m.width-4, 20), 5)
-	return panelBorder.BorderForeground(m.borderColor(focusGame)).Width(max(m.width-2, 20)).Render(content) + "\n" +
-		panelBorder.BorderForeground(m.borderColor(focusChat)).Width(max(m.width-2, 20)).Height(7).Render(footer)
+	overlayHeight := min(max(10, m.height/3), max(panelHeight-2, 6))
+	overlay := panelBorder.BorderForeground(lipgloss.Color("#facc15")).Width(panelWidth).Height(overlayHeight).Render(m.renderChat(contentWidth, max(overlayHeight-2, 1)))
+	return overlayBottom(game, overlay)
 }
 
 func (m Model) renderGamePanel(width, height int) string {
-	title := m.gameTitle
-	if title == "" && m.activeGame != nil {
-		title = m.activeGame.Name
+	view := cropLines(m.surface.Render(), width, height)
+	if m.exitArmed {
+		return overlayBottom(view, fitLine(errorStyle.Render("Press escape again to return to the gateway."), width))
 	}
-	if title == "" {
-		title = "Connecting"
-	}
-
-	var b strings.Builder
-	b.WriteString(titleStyle.Render(title))
-	b.WriteString(" ")
-	b.WriteString(mutedStyle.Render(m.gameStatus))
-	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("tab/ctrl+g: focus chat/game  esc: gateway"))
-	b.WriteString("\n")
-	surfaceHeight := max(height-3, 1)
-	b.WriteString(cropLines(m.surface.Render(), width, surfaceHeight))
-	b.WriteString("\n")
-	b.WriteString(fitLine(focusStyle.Render(m.gameMessage), width))
-
-	return cropLines(b.String(), width, height)
+	return view
 }
 
 func (m Model) renderChat(width, height int) string {
 	var b strings.Builder
-	focusLabel := ""
-	if m.focus == focusChat {
-		focusLabel = " " + focusStyle.Render("focused")
-	}
 	b.WriteString(titleStyle.Render("Room Chat"))
-	b.WriteString(focusLabel)
+	b.WriteString(" ")
+	b.WriteString(mutedStyle.Render("tab/esc: close  enter: send"))
 	b.WriteString("\n")
 
 	available := max(height-4, 1)
 	start := max(len(m.messages)-available, 0)
 	for _, msg := range m.messages[start:] {
-		line := fmt.Sprintf("%s: %s", msg.DisplayName, msg.Body)
-		b.WriteString(fitLine(line, width))
+		b.WriteString(fitLine(renderChatMessage(msg.DisplayName, msg.Body), width))
 		b.WriteString("\n")
 	}
 
@@ -147,11 +132,7 @@ func (m Model) renderChat(width, height int) string {
 		b.WriteString("\n")
 	}
 
-	prompt := "> " + m.chatInput
-	if m.focus != focusChat {
-		prompt = mutedStyle.Render("tab to chat")
-	}
-	b.WriteString(fitLine(prompt, width))
+	b.WriteString(fitLine(focusStyle.Render("> "+m.chatInput+"_"), width))
 	return cropLines(b.String(), width, height)
 }
 
@@ -161,42 +142,33 @@ func (m Model) renderError() string {
 	)
 }
 
-func (m Model) borderColor(area focusArea) color.Color {
-	if m.focus == area {
-		return lipgloss.Color("#facc15")
+func overlayBottom(base, overlay string) string {
+	baseLines := strings.Split(base, "\n")
+	overlayLines := strings.Split(overlay, "\n")
+	start := max(len(baseLines)-len(overlayLines), 0)
+	for i, line := range overlayLines {
+		idx := start + i
+		if idx >= len(baseLines) {
+			baseLines = append(baseLines, line)
+			continue
+		}
+		baseLines[idx] = line
 	}
-	return lipgloss.Color("#334155")
+	return strings.Join(baseLines, "\n")
 }
 
-func joinColumns(left, right, gap string) string {
-	leftLines := strings.Split(left, "\n")
-	rightLines := strings.Split(right, "\n")
-	width := 0
-	for _, line := range leftLines {
-		if len([]rune(stripANSI(line))) > width {
-			width = len([]rune(stripANSI(line)))
-		}
+func renderChatMessage(name, body string) string {
+	return chatNameStyle(name).Render(name) + mutedStyle.Render(": ") + body
+}
+
+func chatNameStyle(name string) lipgloss.Style {
+	if len(chatNameColors) == 0 {
+		return goodStyle
 	}
-	rows := max(len(leftLines), len(rightLines))
-	var b strings.Builder
-	for i := 0; i < rows; i++ {
-		leftLine := ""
-		if i < len(leftLines) {
-			leftLine = leftLines[i]
-		}
-		rightLine := ""
-		if i < len(rightLines) {
-			rightLine = rightLines[i]
-		}
-		b.WriteString(leftLine)
-		b.WriteString(strings.Repeat(" ", max(width-len([]rune(stripANSI(leftLine))), 0)))
-		b.WriteString(gap)
-		b.WriteString(rightLine)
-		if i < rows-1 {
-			b.WriteByte('\n')
-		}
-	}
-	return b.String()
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(strings.ToLower(name)))
+	color := chatNameColors[int(hash.Sum32())%len(chatNameColors)]
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true)
 }
 
 func cropLines(value string, width, height int) string {
@@ -264,6 +236,13 @@ func stripANSI(value string) string {
 
 func max(a, b int) int {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func min(a, b int) int {
+	if a < b {
 		return a
 	}
 	return b
