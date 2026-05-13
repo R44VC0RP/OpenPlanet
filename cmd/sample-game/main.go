@@ -2,10 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 
@@ -13,17 +16,44 @@ import (
 )
 
 const (
-	worldWidth  = 180
-	worldHeight = 92
+	gameID       = "cell-garden"
+	worldWidth   = 180
+	worldHeight  = 92
+	maxPlayers   = 16
+	helloTimeout = 5 * time.Second
 )
+
+type gameServer struct {
+	secret   string
+	issuer   string
+	endpoint string
+	replay   *ggp.ReplayCache
+
+	mu    sync.Mutex
+	rooms map[string]*room
+}
+
+type room struct {
+	id       string
+	players  map[string]*actor
+	sessions map[*session]struct{}
+	mu       sync.Mutex
+}
+
+type actor struct {
+	id    string
+	name  string
+	x     int
+	y     int
+	color string
+}
 
 type session struct {
 	conn    *websocket.Conn
-	player  string
+	room    *room
+	player  actor
 	cols    int
 	rows    int
-	x       int
-	y       int
 	seq     int
 	message string
 	mu      sync.Mutex
@@ -53,97 +83,174 @@ var (
 		{x: 126, y: 64, w: 15, h: 7},
 		{x: 153, y: 50, w: 14, h: 7},
 	}
+	spawnPoints = [][2]int{{88, 38}, {84, 38}, {92, 38}, {88, 34}, {88, 42}, {35, 58}, {126, 58}, {154, 58}}
+	nameColors  = []string{"#7dd3fc", "#f472b6", "#facc15", "#4ade80", "#fb923c", "#c084fc", "#2dd4bf", "#f87171"}
 )
 
 func main() {
+	server := &gameServer{
+		secret:   env("GGP_SESSION_SECRET", ""),
+		issuer:   env("GGP_ISSUER", "gamegateway"),
+		endpoint: env("GGP_ENDPOINT_URL", ""),
+		replay:   ggp.NewReplayCache(),
+		rooms:    make(map[string]*room),
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	})
-	mux.HandleFunc("/ggp", handleGGP)
+	mux.HandleFunc("/ggp", server.handleGGP)
 
 	addr := ":" + env("PORT", "8081")
-	log.Printf("sample RPG game listening on %s", addr)
+	mode := "single-player"
+	if server.secret != "" {
+		mode = "secure multiplayer"
+	}
+	log.Printf("sample RPG game listening on %s (%s)", addr, mode)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func handleGGP(w http.ResponseWriter, r *http.Request) {
+func (g *gameServer) handleGGP(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("upgrade failed: %v", err)
 		return
 	}
 	defer conn.Close()
+	conn.SetReadLimit(64 * 1024)
 
-	_, payload, err := conn.ReadMessage()
+	hello, err := readHello(conn)
 	if err != nil {
+		_ = conn.WriteJSON(ggp.Error{Type: ggp.TypeError, Code: ggp.ErrorUnsupportedProtocol, Message: err.Error()})
 		return
 	}
 
-	var hello ggp.Hello
-	if err := json.Unmarshal(payload, &hello); err != nil || hello.Type != ggp.TypeHello {
-		_ = conn.WriteJSON(ggp.Error{Type: ggp.TypeError, Message: "expected hello"})
+	roomID := "session:" + hello.SessionID
+	if g.secret != "" {
+		if err := g.validateHello(hello); err != nil {
+			_ = conn.WriteJSON(ggp.Error{Type: ggp.TypeError, Code: ggp.ErrorAuthInvalid, Message: err.Error()})
+			return
+		}
+		roomID = hello.RoomID
+	}
+
+	s, err := g.join(conn, roomID, hello)
+	if err != nil {
+		_ = conn.WriteJSON(ggp.Error{Type: ggp.TypeError, Code: ggp.ErrorRoomFull, Message: err.Error()})
 		return
 	}
+	defer func() {
+		s.room.leave(s)
+		s.room.broadcast()
+	}()
 
-	s := &session{
-		conn:    conn,
-		player:  hello.Player.Name,
-		cols:    max(hello.Viewport.Cols, 40),
-		rows:    max(hello.Viewport.Rows, 14),
-		x:       88,
-		y:       38,
-		message: "Walk the village with arrow keys or WASD. Houses block movement.",
-	}
-
-	_ = conn.WriteJSON(ggp.Ready{
+	ready := ggp.Ready{
 		Type:         ggp.TypeReady,
 		Title:        "Meadow Village",
 		TargetFPS:    8,
 		Capabilities: []string{ggp.CapRenderCell, ggp.CapInputKeyboard},
-	})
-	s.sendFrame()
+	}
+	if g.secret != "" {
+		ready.Capabilities = append(ready.Capabilities, ggp.CapAuthSession, ggp.CapMultiplayer, ggp.CapPresence)
+		ready.Multiplayer = &ggp.Multiplayer{Mode: ggp.MultiplayerModeRoom, MaxPlayers: maxPlayers, Presence: true}
+	}
+	_ = conn.WriteJSON(ready)
+	s.room.broadcast()
 
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			return
 		}
-		s.handleMessage(msg)
+		if !s.handleMessage(msg) {
+			return
+		}
 	}
 }
 
-func (s *session) handleMessage(payload []byte) {
-	var envelope ggp.Envelope
-	if err := json.Unmarshal(payload, &envelope); err != nil {
-		return
+func readHello(conn *websocket.Conn) (ggp.Hello, error) {
+	_ = conn.SetReadDeadline(time.Now().Add(helloTimeout))
+	_, payload, err := conn.ReadMessage()
+	_ = conn.SetReadDeadline(time.Time{})
+	if err != nil {
+		return ggp.Hello{}, err
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	switch envelope.Type {
-	case ggp.TypeInput:
-		var input ggp.Input
-		if err := json.Unmarshal(payload, &input); err != nil {
-			return
-		}
-		s.move(input.Key)
-	case ggp.TypeResize:
-		var resize ggp.Resize
-		if err := json.Unmarshal(payload, &resize); err != nil {
-			return
-		}
-		s.cols = max(resize.Cols, 40)
-		s.rows = max(resize.Rows, 14)
+	var hello ggp.Hello
+	if err := json.Unmarshal(payload, &hello); err != nil {
+		return ggp.Hello{}, err
 	}
-
-	s.sendFrameLocked()
+	if hello.Type != ggp.TypeHello || hello.Protocol != ggp.ProtocolCellV1 || hello.SessionID == "" || hello.Player.ID == "" {
+		return ggp.Hello{}, errors.New("expected valid ggp.cell.v1 hello")
+	}
+	return hello, nil
 }
 
-func (s *session) move(key string) {
+func (g *gameServer) validateHello(hello ggp.Hello) error {
+	if hello.Auth == nil || hello.Auth.Type != ggp.AuthTypeSessionJWT || hello.Auth.Token == "" {
+		return errors.New("multiplayer requires gateway session auth")
+	}
+	_, err := ggp.ValidateSessionToken(g.secret, hello.Auth.Token, ggp.SessionTokenExpected{
+		Issuer:      g.issuer,
+		Audience:    gameID,
+		Player:      hello.Player,
+		SessionID:   hello.SessionID,
+		RoomID:      hello.RoomID,
+		GameID:      gameID,
+		Endpoint:    g.endpoint,
+		ReplayCache: g.replay,
+	})
+	return err
+}
+
+func (g *gameServer) join(conn *websocket.Conn, roomID string, hello ggp.Hello) (*session, error) {
+	g.mu.Lock()
+	r := g.rooms[roomID]
+	if r == nil {
+		r = &room{id: roomID, players: make(map[string]*actor), sessions: make(map[*session]struct{})}
+		g.rooms[roomID] = r
+	}
+	g.mu.Unlock()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.players[hello.Player.ID]; exists {
+		return nil, errors.New("player already has an active session in this room")
+	}
+	if len(r.players) >= maxPlayers {
+		return nil, errors.New("room is full")
+	}
+	spawn := spawnPoints[len(r.players)%len(spawnPoints)]
+	player := actor{
+		id:    hello.Player.ID,
+		name:  hello.Player.Name,
+		x:     spawn[0],
+		y:     spawn[1],
+		color: nameColors[len(r.players)%len(nameColors)],
+	}
+	r.players[player.id] = &player
+	s := &session{
+		conn:    conn,
+		room:    r,
+		player:  player,
+		cols:    max(hello.Viewport.Cols, 40),
+		rows:    max(hello.Viewport.Rows, 14),
+		message: "Walk the village with arrow keys or WASD. Other players share this room.",
+	}
+	r.sessions[s] = struct{}{}
+	return s, nil
+}
+
+func (r *room) leave(s *session) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.sessions, s)
+	delete(r.players, s.player.id)
+}
+
+func (r *room) move(playerID, key string) string {
 	dx, dy := 0, 0
 	switch key {
 	case "left", "h", "a":
@@ -155,52 +262,140 @@ func (s *session) move(key string) {
 	case "down", "j", "s":
 		dy = 1
 	default:
-		return
+		return ""
 	}
 
-	nx, ny := s.x+dx, s.y+dy
-	if blocked(nx, ny) {
-		s.message = "That way is blocked. Try the village paths."
-		return
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	player := r.players[playerID]
+	if player == nil {
+		return "Player is no longer in this room."
+	}
+	nx, ny := player.x+dx, player.y+dy
+	if blocked(nx, ny) || r.occupiedLocked(playerID, nx, ny) {
+		return "That way is blocked. Try the village paths."
+	}
+	player.x, player.y = nx, ny
+	return describeTile(nx, ny)
+}
+
+func (r *room) occupiedLocked(playerID string, x, y int) bool {
+	for id, player := range r.players {
+		if id != playerID && player.x == x && player.y == y {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *room) broadcast() {
+	sessions, players := r.snapshot()
+	for _, s := range sessions {
+		s.sendFrame(players)
+	}
+	if len(sessions) > 0 {
+		presence := r.presence(players)
+		for _, s := range sessions {
+			_ = s.writeJSON(presence)
+		}
+	}
+}
+
+func (r *room) snapshot() ([]*session, []actor) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	sessions := make([]*session, 0, len(r.sessions))
+	for s := range r.sessions {
+		sessions = append(sessions, s)
+	}
+	players := make([]actor, 0, len(r.players))
+	for _, player := range r.players {
+		players = append(players, *player)
+	}
+	return sessions, players
+}
+
+func (r *room) presence(players []actor) ggp.Presence {
+	presence := ggp.Presence{Type: ggp.TypePresence, RoomID: r.id, MaxPlayers: maxPlayers, Players: make([]ggp.PresencePlayer, 0, len(players))}
+	for _, player := range players {
+		presence.Players = append(presence.Players, ggp.PresencePlayer{ID: player.id, Name: player.name, State: "playing"})
+	}
+	return presence
+}
+
+func (s *session) handleMessage(payload []byte) bool {
+	var envelope ggp.Envelope
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return true
 	}
 
-	s.x, s.y = nx, ny
-	s.message = describeTile(nx, ny)
+	switch envelope.Type {
+	case ggp.TypeInput:
+		var input ggp.Input
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return true
+		}
+		if message := s.room.move(s.player.id, input.Key); message != "" {
+			s.message = message
+		}
+		s.room.broadcast()
+	case ggp.TypeResize:
+		var resize ggp.Resize
+		if err := json.Unmarshal(payload, &resize); err != nil {
+			return true
+		}
+		s.cols = max(resize.Cols, 40)
+		s.rows = max(resize.Rows, 14)
+		_, players := s.room.snapshot()
+		s.sendFrame(players)
+	case ggp.TypeLeave:
+		return false
+	}
+	return true
 }
 
-func (s *session) sendFrame() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.sendFrameLocked()
-}
-
-func (s *session) sendFrameLocked() {
-	s.seq++
+func (s *session) sendFrame(players []actor) {
 	frame := ggp.Frame{
 		Type:   ggp.TypeFrame,
-		Seq:    s.seq,
 		Mode:   ggp.FrameFull,
 		Status: s.message,
-		Cells:  s.renderCells(),
+		Cells:  s.renderCells(players),
 	}
-	_ = s.conn.WriteJSON(frame)
+	s.mu.Lock()
+	s.seq++
+	frame.Seq = s.seq
+	s.mu.Unlock()
+	_ = s.writeJSON(frame)
 }
 
-func (s *session) renderCells() []ggp.Cell {
+func (s *session) writeJSON(value any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.conn.WriteJSON(value)
+}
+
+func (s *session) renderCells(players []actor) []ggp.Cell {
 	cols := max(s.cols, 40)
 	rows := max(s.rows, 14)
 	cells := make([]ggp.Cell, 0, cols*rows)
+	self := s.player
+	for _, player := range players {
+		if player.id == s.player.id {
+			self = player
+			break
+		}
+	}
 
 	viewRows := max(rows, 8)
-	camX := clamp(s.x-cols/2, 0, max(worldWidth-cols, 0))
-	camY := clamp(s.y-viewRows/2, 0, max(worldHeight-viewRows, 0))
+	camX := clamp(self.x-cols/2, 0, max(worldWidth-cols, 0))
+	camY := clamp(self.y-viewRows/2, 0, max(worldHeight-viewRows, 0))
 
 	for y := 0; y < rows; y++ {
 		for x := 0; x < cols; x++ {
 			wx, wy := camX+x, camY+y
 			ch, fg, bg := tile(wx, wy)
-			if wx == s.x && wy == s.y {
-				ch, fg, bg = "@", "#7dd3fc", bg
+			if player, ok := playerAt(players, wx, wy); ok {
+				ch, fg = playerGlyph(player, player.id == s.player.id), player.color
 			}
 			cells = append(cells, ggp.Cell{X: x, Y: y, Ch: ch, Fg: fg, Bg: bg})
 		}
@@ -209,17 +404,24 @@ func (s *session) renderCells() []ggp.Cell {
 	return cells
 }
 
-func (s *session) writeText(cells []ggp.Cell, x, y int, text, fg, bg string) {
-	for i, r := range text {
-		cx := x + i
-		if cx >= s.cols-2 || y < 0 || y >= s.rows {
-			return
-		}
-		idx := y*s.cols + cx
-		if idx >= 0 && idx < len(cells) {
-			cells[idx] = ggp.Cell{X: cx, Y: y, Ch: string(r), Fg: fg, Bg: bg, Attrs: []string{"bold"}}
+func playerAt(players []actor, x, y int) (actor, bool) {
+	for _, player := range players {
+		if player.x == x && player.y == y {
+			return player, true
 		}
 	}
+	return actor{}, false
+}
+
+func playerGlyph(player actor, self bool) string {
+	if self {
+		return "@"
+	}
+	name := strings.TrimSpace(player.name)
+	if name == "" {
+		return "?"
+	}
+	return strings.ToUpper(string([]rune(name)[0]))
 }
 
 func tile(x, y int) (string, string, string) {

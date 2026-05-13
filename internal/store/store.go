@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -18,23 +19,86 @@ type Store struct {
 	pool *pgxpool.Pool
 }
 
+const (
+	RoleStandard = "standard"
+	RoleAdmin    = "admin"
+
+	GameStatusPending  = "pending"
+	GameStatusApproved = "approved"
+	GameStatusRejected = "rejected"
+	GameStatusDisabled = "disabled"
+
+	CheckStatusPassed = "passed"
+	CheckStatusFailed = "failed"
+)
+
+var (
+	gameIDPattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
+	imageRefPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@-]{2,255}$`)
+)
+
 type Player struct {
 	ID            string
 	DisplayName   string
 	Fingerprint   string
 	NameConfirmed bool
+	Role          string
 }
 
 type Game struct {
+	ID              string
+	Name            string
+	Description     string
+	EndpointURL     string
+	Protocol        string
+	MinCols         int
+	MinRows         int
+	MaxPlayers      int
+	SupportsMouse   bool
+	Status          string
+	SubmittedBy     string
+	SubmittedByName string
+	ReviewedBy      string
+	ReviewNote      string
+	LastCheckStatus string
+	LastCheckError  string
+	SessionSecret   string
+	ImageRef        string
+	ImageDigest     string
+	ContainerPort   int
+	RuntimeStatus   string
+	RuntimeError    string
+	SubmittedAt     time.Time
+	ReviewedAt      time.Time
+	LastCheckedAt   time.Time
+}
+
+type GameSubmission struct {
+	ID              string
+	Name            string
+	Description     string
+	ImageRef        string
+	ContainerPort   int
+	MinCols         int
+	MinRows         int
+	MaxPlayers      int
+	SupportsMouse   bool
+	SubmittedBy     string
+	SessionSecret   string
+	LastCheckStatus string
+	LastCheckError  string
+}
+
+type ImageGame struct {
 	ID            string
-	Name          string
-	Description   string
-	EndpointURL   string
-	Protocol      string
-	MinCols       int
-	MinRows       int
-	MaxPlayers    int
-	SupportsMouse bool
+	ImageRef      string
+	ContainerPort int
+	SessionSecret string
+	Status        string
+}
+
+type scanner interface {
+	Scan(dest ...any) error
 }
 
 type ChatMessage struct {
@@ -74,13 +138,19 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if _, err := s.pool.Exec(ctx, schemaSQL); err != nil {
 		return err
 	}
-	return s.migratePlayerNames(ctx)
+	if err := s.migratePlayerNames(ctx); err != nil {
+		return err
+	}
+	return s.migrateModeration(ctx)
 }
 
-func (s *Store) SeedSampleGame(ctx context.Context, endpointURL string) error {
+func (s *Store) SeedSampleGame(ctx context.Context, endpointURL string, maxPlayers int, sessionSecret string) error {
+	if maxPlayers < 1 {
+		maxPlayers = 1
+	}
 	_, err := s.pool.Exec(ctx, `
-		insert into games (id, name, description, endpoint_url, protocol, min_cols, min_rows, max_players, supports_mouse)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		insert into games (id, name, description, endpoint_url, protocol, min_cols, min_rows, max_players, supports_mouse, status, enabled, session_secret, image_ref, container_port, last_check_status, last_check_error, last_checked_at, runtime_status, runtime_error)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'approved', true, $10, '', 8081, 'passed', '', now(), 'running', '')
 		on conflict (id) do update set
 			name = excluded.name,
 			description = excluded.description,
@@ -90,8 +160,76 @@ func (s *Store) SeedSampleGame(ctx context.Context, endpointURL string) error {
 			min_rows = excluded.min_rows,
 			max_players = excluded.max_players,
 			supports_mouse = excluded.supports_mouse,
+			status = 'approved',
+			enabled = true,
+			session_secret = excluded.session_secret,
+			image_ref = '',
+			container_port = 8081,
+			last_check_status = 'passed',
+			last_check_error = '',
+			last_checked_at = now(),
+			runtime_status = 'running',
+			runtime_error = '',
 			updated_at = now()
-	`, "cell-garden", "Meadow Village", "A tiny RPG-style village you can walk around with arrow keys or WASD.", endpointURL, "ggp.cell.v1", 60, 18, 1, false)
+	`, "cell-garden", "Meadow Village", "A tiny multiplayer RPG-style village you can walk around with arrow keys or WASD.", endpointURL, "ggp.cell.v1", 60, 18, maxPlayers, false, sessionSecret)
+	return err
+}
+
+func (s *Store) SeedBlobfieldGame(ctx context.Context, endpointURL string, maxPlayers int, sessionSecret string) error {
+	if maxPlayers < 1 {
+		maxPlayers = 1
+	}
+	_, err := s.pool.Exec(ctx, `
+		insert into games (id, name, description, endpoint_url, protocol, min_cols, min_rows, max_players, supports_mouse, status, enabled, session_secret, image_ref, container_port, last_check_status, last_check_error, last_checked_at, runtime_status, runtime_error)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'approved', true, $10, '', 8082, 'passed', '', now(), 'running', '')
+		on conflict (id) do update set
+			name = excluded.name,
+			description = excluded.description,
+			endpoint_url = excluded.endpoint_url,
+			protocol = excluded.protocol,
+			min_cols = excluded.min_cols,
+			min_rows = excluded.min_rows,
+			max_players = excluded.max_players,
+			supports_mouse = excluded.supports_mouse,
+			status = 'approved',
+			enabled = true,
+			session_secret = excluded.session_secret,
+			image_ref = '',
+			container_port = 8082,
+			last_check_status = 'passed',
+			last_check_error = '',
+			last_checked_at = now(),
+			runtime_status = 'running',
+			runtime_error = '',
+			updated_at = now()
+	`, "blobfield", "Blobfield", "A multiplayer blob arena: eat pellets, grow big, and swallow smaller players.", endpointURL, "ggp.cell.v1", 70, 20, maxPlayers, false, sessionSecret)
+	return err
+}
+
+func (s *Store) SeedTetrisGame(ctx context.Context) error {
+	_, err := s.pool.Exec(ctx, `
+		insert into games (id, name, description, endpoint_url, protocol, min_cols, min_rows, max_players, supports_mouse, status, enabled, session_secret, image_ref, container_port, last_check_status, last_check_error, last_checked_at, runtime_status, runtime_error)
+		values ('tetris', 'Tetris', 'Classic falling-block puzzle game.', 'ws://gamegateway-game-tetris:8080/ggp', 'ggp.cell.v1', 40, 20, 1, false, 'approved', true, '', 'ghcr.io/0ximjosh/tetris-server:latest', 8080, 'passed', '', now(), 'running', '')
+		on conflict (id) do update set
+			name = excluded.name,
+			description = excluded.description,
+			endpoint_url = excluded.endpoint_url,
+			protocol = excluded.protocol,
+			min_cols = excluded.min_cols,
+			min_rows = excluded.min_rows,
+			max_players = excluded.max_players,
+			supports_mouse = excluded.supports_mouse,
+			status = 'approved',
+			enabled = true,
+			image_ref = excluded.image_ref,
+			container_port = excluded.container_port,
+			last_check_status = 'passed',
+			last_check_error = '',
+			last_checked_at = now(),
+			runtime_status = 'running',
+			runtime_error = '',
+			updated_at = now()
+	`)
 	return err
 }
 
@@ -104,11 +242,11 @@ func (s *Store) EnsurePlayer(ctx context.Context, key identity.KeyInfo) (Player,
 
 	var player Player
 	err = tx.QueryRow(ctx, `
-		select p.id::text, p.display_name, k.fingerprint, p.name_confirmed
+		select p.id::text, p.display_name, k.fingerprint, p.name_confirmed, p.role
 		from ssh_keys k
 		join players p on p.id = k.player_id
 		where k.fingerprint = $1 and k.revoked_at is null
-	`, key.Fingerprint).Scan(&player.ID, &player.DisplayName, &player.Fingerprint, &player.NameConfirmed)
+	`, key.Fingerprint).Scan(&player.ID, &player.DisplayName, &player.Fingerprint, &player.NameConfirmed, &player.Role)
 
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return Player{}, err
@@ -121,10 +259,10 @@ func (s *Store) EnsurePlayer(ctx context.Context, key identity.KeyInfo) (Player,
 		}
 
 		err = tx.QueryRow(ctx, `
-			insert into players (display_name, name_confirmed)
-			values ($1, false)
-			returning id::text, display_name, name_confirmed
-		`, displayName).Scan(&player.ID, &player.DisplayName, &player.NameConfirmed)
+			insert into players (display_name, name_confirmed, role)
+			values ($1, false, 'standard')
+			returning id::text, display_name, name_confirmed, role
+		`, displayName).Scan(&player.ID, &player.DisplayName, &player.NameConfirmed, &player.Role)
 		if err != nil {
 			return Player{}, err
 		}
@@ -180,8 +318,8 @@ func (s *Store) UpdatePlayerDisplayName(ctx context.Context, player Player, requ
 		update players
 		set display_name = $1, name_confirmed = true, last_seen_at = now()
 		where id = $2
-		returning id::text, display_name, name_confirmed
-	`, displayName, player.ID).Scan(&player.ID, &player.DisplayName, &player.NameConfirmed)
+		returning id::text, display_name, name_confirmed, role
+	`, displayName, player.ID).Scan(&player.ID, &player.DisplayName, &player.NameConfirmed, &player.Role)
 	if err != nil {
 		return Player{}, err
 	}
@@ -194,9 +332,13 @@ func (s *Store) UpdatePlayerDisplayName(ctx context.Context, player Player, requ
 
 func (s *Store) ListGames(ctx context.Context) ([]Game, error) {
 	rows, err := s.pool.Query(ctx, `
-		select id, name, description, endpoint_url, protocol, min_cols, min_rows, max_players, supports_mouse
+		select games.id, games.name, games.description, games.endpoint_url, games.protocol, games.min_cols, games.min_rows, games.max_players, games.supports_mouse,
+			status, coalesce(submitted_by::text, ''), coalesce(submitter.display_name, ''), coalesce(reviewed_by::text, ''), coalesce(review_note, ''),
+			coalesce(last_check_status, ''), coalesce(last_check_error, ''), coalesce(session_secret, ''), coalesce(image_ref, ''), coalesce(image_digest, ''), container_port, coalesce(runtime_status, ''), coalesce(runtime_error, ''),
+			submitted_at, coalesce(reviewed_at, '0001-01-01'::timestamptz), coalesce(last_checked_at, '0001-01-01'::timestamptz)
 		from games
-		where enabled = true
+		left join players submitter on submitter.id = games.submitted_by
+		where enabled = true and status = 'approved'
 		order by name
 	`)
 	if err != nil {
@@ -206,8 +348,127 @@ func (s *Store) ListGames(ctx context.Context) ([]Game, error) {
 
 	var games []Game
 	for rows.Next() {
-		var game Game
-		if err := rows.Scan(&game.ID, &game.Name, &game.Description, &game.EndpointURL, &game.Protocol, &game.MinCols, &game.MinRows, &game.MaxPlayers, &game.SupportsMouse); err != nil {
+		game, err := scanGame(rows)
+		if err != nil {
+			return nil, err
+		}
+		games = append(games, game)
+	}
+	return games, rows.Err()
+}
+
+func (s *Store) ListSubmittedGames(ctx context.Context) ([]Game, error) {
+	rows, err := s.pool.Query(ctx, `
+		select games.id, games.name, games.description, games.endpoint_url, games.protocol, games.min_cols, games.min_rows, games.max_players, games.supports_mouse,
+			status, coalesce(submitted_by::text, ''), coalesce(submitter.display_name, ''), coalesce(reviewed_by::text, ''), coalesce(review_note, ''),
+			coalesce(last_check_status, ''), coalesce(last_check_error, ''), coalesce(session_secret, ''), coalesce(image_ref, ''), coalesce(image_digest, ''), container_port, coalesce(runtime_status, ''), coalesce(runtime_error, ''),
+			submitted_at, coalesce(reviewed_at, '0001-01-01'::timestamptz), coalesce(last_checked_at, '0001-01-01'::timestamptz)
+		from games
+		left join players submitter on submitter.id = games.submitted_by
+		where status = 'pending'
+		order by submitted_at desc, name
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var games []Game
+	for rows.Next() {
+		game, err := scanGame(rows)
+		if err != nil {
+			return nil, err
+		}
+		games = append(games, game)
+	}
+	return games, rows.Err()
+}
+
+func (s *Store) SubmitGame(ctx context.Context, submission GameSubmission) (Game, error) {
+	if submission.ContainerPort == 0 {
+		submission.ContainerPort = 8081
+	}
+	if err := validateGameSubmission(submission); err != nil {
+		return Game{}, err
+	}
+	row := s.pool.QueryRow(ctx, `
+		insert into games (id, name, description, endpoint_url, protocol, min_cols, min_rows, max_players, supports_mouse, enabled, status, submitted_by, session_secret, image_ref, container_port, last_check_status, last_check_error, last_checked_at, runtime_status, runtime_error)
+		values ($1, $2, $3, $4, 'ggp.cell.v1', $5, $6, $7, $8, false, 'pending', $9, $10, $11, $12, $13, $14, now(), 'pending-deploy', '')
+		returning id, name, description, endpoint_url, protocol, min_cols, min_rows, max_players, supports_mouse,
+			status, coalesce(submitted_by::text, ''), '', coalesce(reviewed_by::text, ''), coalesce(review_note, ''),
+			coalesce(last_check_status, ''), coalesce(last_check_error, ''), coalesce(session_secret, ''), coalesce(image_ref, ''), coalesce(image_digest, ''), container_port, coalesce(runtime_status, ''), coalesce(runtime_error, ''),
+			submitted_at, coalesce(reviewed_at, '0001-01-01'::timestamptz), coalesce(last_checked_at, '0001-01-01'::timestamptz)
+	`, submission.ID, strings.TrimSpace(submission.Name), strings.TrimSpace(submission.Description), ImageEndpointURL(submission.ID, submission.ContainerPort), submission.MinCols, submission.MinRows, submission.MaxPlayers, submission.SupportsMouse, submission.SubmittedBy, strings.TrimSpace(submission.SessionSecret), strings.TrimSpace(submission.ImageRef), submission.ContainerPort, submission.LastCheckStatus, submission.LastCheckError)
+	game, err := scanGame(row)
+	if err != nil {
+		if strings.Contains(err.Error(), "duplicate key") {
+			return Game{}, errors.New("a game with that ID already exists")
+		}
+		return Game{}, err
+	}
+	return game, nil
+}
+
+func (s *Store) ApproveGame(ctx context.Context, gameID string, reviewer Player) error {
+	if reviewer.Role != RoleAdmin {
+		return errors.New("admin role is required")
+	}
+	_, err := s.pool.Exec(ctx, `
+		update games
+		set status = 'approved', enabled = true, reviewed_by = $2, reviewed_at = now(), review_note = '', updated_at = now()
+		where id = $1 and status = 'pending'
+	`, gameID, reviewer.ID)
+	return err
+}
+
+func (s *Store) RejectGame(ctx context.Context, gameID string, reviewer Player, note string) error {
+	if reviewer.Role != RoleAdmin {
+		return errors.New("admin role is required")
+	}
+	_, err := s.pool.Exec(ctx, `
+		update games
+		set status = 'rejected', enabled = false, reviewed_by = $2, reviewed_at = now(), review_note = $3, updated_at = now()
+		where id = $1 and status = 'pending'
+	`, gameID, reviewer.ID, strings.TrimSpace(note))
+	return err
+}
+
+func (s *Store) UpdateGameCheck(ctx context.Context, gameID, status, message string) error {
+	_, err := s.pool.Exec(ctx, `
+		update games
+		set last_check_status = $2, last_check_error = $3, last_checked_at = now(), updated_at = now()
+		where id = $1
+	`, gameID, status, strings.TrimSpace(message))
+	return err
+}
+
+func (s *Store) RefreshPlayer(ctx context.Context, player Player) (Player, error) {
+	err := s.pool.QueryRow(ctx, `
+		select p.id::text, p.display_name, coalesce(k.fingerprint, ''), p.name_confirmed, p.role
+		from players p
+		left join ssh_keys k on k.player_id = p.id and k.revoked_at is null
+		where p.id = $1
+		limit 1
+	`, player.ID).Scan(&player.ID, &player.DisplayName, &player.Fingerprint, &player.NameConfirmed, &player.Role)
+	return player, err
+}
+
+func (s *Store) ListRunnableImageGames(ctx context.Context) ([]ImageGame, error) {
+	rows, err := s.pool.Query(ctx, `
+		select id, image_ref, container_port, coalesce(session_secret, ''), status
+		from games
+		where image_ref <> '' and status in ('pending', 'approved')
+		order by id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var games []ImageGame
+	for rows.Next() {
+		var game ImageGame
+		if err := rows.Scan(&game.ID, &game.ImageRef, &game.ContainerPort, &game.SessionSecret, &game.Status); err != nil {
 			return nil, err
 		}
 		games = append(games, game)
@@ -308,6 +569,119 @@ func (s *Store) Leaderboard(ctx context.Context, gameID string, limit int) ([]Le
 		entries = append(entries, entry)
 	}
 	return entries, rows.Err()
+}
+
+func scanGame(row scanner) (Game, error) {
+	var game Game
+	err := row.Scan(
+		&game.ID,
+		&game.Name,
+		&game.Description,
+		&game.EndpointURL,
+		&game.Protocol,
+		&game.MinCols,
+		&game.MinRows,
+		&game.MaxPlayers,
+		&game.SupportsMouse,
+		&game.Status,
+		&game.SubmittedBy,
+		&game.SubmittedByName,
+		&game.ReviewedBy,
+		&game.ReviewNote,
+		&game.LastCheckStatus,
+		&game.LastCheckError,
+		&game.SessionSecret,
+		&game.ImageRef,
+		&game.ImageDigest,
+		&game.ContainerPort,
+		&game.RuntimeStatus,
+		&game.RuntimeError,
+		&game.SubmittedAt,
+		&game.ReviewedAt,
+		&game.LastCheckedAt,
+	)
+	return game, err
+}
+
+func validateGameSubmission(submission GameSubmission) error {
+	if !gameIDPattern.MatchString(submission.ID) {
+		return errors.New("game ID must use lowercase letters, numbers, and hyphens")
+	}
+	if strings.TrimSpace(submission.Name) == "" {
+		return errors.New("game name is required")
+	}
+	if len([]rune(submission.Name)) > 60 {
+		return errors.New("game name must be 60 characters or fewer")
+	}
+	if strings.TrimSpace(submission.Description) == "" {
+		return errors.New("game description is required")
+	}
+	if len([]rune(submission.Description)) > 240 {
+		return errors.New("game description must be 240 characters or fewer")
+	}
+	if strings.TrimSpace(submission.ImageRef) == "" {
+		return errors.New("Docker image is required")
+	}
+	if !imageRefPattern.MatchString(strings.TrimSpace(submission.ImageRef)) || strings.Contains(submission.ImageRef, " ") {
+		return errors.New("Docker image must be a valid image reference")
+	}
+	if strings.HasSuffix(submission.ImageRef, ":latest") || !strings.ContainsAny(lastImageSegment(submission.ImageRef), ":@") {
+		return errors.New("Docker image must be pinned with a non-latest tag or digest")
+	}
+	if submission.ContainerPort < 1 || submission.ContainerPort > 65535 {
+		return errors.New("container port must be between 1 and 65535")
+	}
+	if submission.MinCols < 20 || submission.MinCols > 240 {
+		return errors.New("min columns must be between 20 and 240")
+	}
+	if submission.MinRows < 8 || submission.MinRows > 80 {
+		return errors.New("min rows must be between 8 and 80")
+	}
+	if submission.MaxPlayers < 1 || submission.MaxPlayers > 100 {
+		return errors.New("max players must be between 1 and 100")
+	}
+	if submission.MaxPlayers > 1 && len(submission.SessionSecret) < 32 {
+		return errors.New("multiplayer submissions require a 32+ byte game session secret")
+	}
+	return nil
+}
+
+func ImageEndpointURL(gameID string, port int) string {
+	if port == 0 {
+		port = 8081
+	}
+	return fmt.Sprintf("ws://gamegateway-game-%s:%d/ggp", gameID, port)
+}
+
+func lastImageSegment(imageRef string) string {
+	if i := strings.LastIndex(imageRef, "/"); i >= 0 {
+		return imageRef[i+1:]
+	}
+	return imageRef
+}
+
+func SlugifyGameID(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastDash = false
+		case !lastDash:
+			b.WriteRune('-')
+			lastDash = true
+		}
+		if b.Len() >= 40 {
+			break
+		}
+	}
+	slug := strings.Trim(b.String(), "-")
+	if slug == "" {
+		return "game"
+	}
+	return slug
 }
 
 func cleanDisplayName(value string) string {
@@ -464,11 +838,58 @@ func (s *Store) migratePlayerNames(ctx context.Context) error {
 	return err
 }
 
+func (s *Store) migrateModeration(ctx context.Context) error {
+	statements := []string{
+		`alter table players add column if not exists role text not null default 'standard'`,
+		`alter table games add column if not exists status text not null default 'approved'`,
+		`alter table games add column if not exists submitted_by uuid references players(id) on delete set null`,
+		`alter table games add column if not exists reviewed_by uuid references players(id) on delete set null`,
+		`alter table games add column if not exists submitted_at timestamptz not null default now()`,
+		`alter table games add column if not exists reviewed_at timestamptz`,
+		`alter table games add column if not exists review_note text not null default ''`,
+		`alter table games add column if not exists last_check_status text not null default ''`,
+		`alter table games add column if not exists last_check_error text not null default ''`,
+		`update games set last_check_error = '' where last_check_error is null`,
+		`alter table games add column if not exists last_checked_at timestamptz`,
+		`alter table games add column if not exists session_secret text not null default ''`,
+		`alter table games add column if not exists image_ref text not null default ''`,
+		`alter table games add column if not exists image_digest text not null default ''`,
+		`alter table games add column if not exists container_port integer not null default 8081`,
+		`alter table games add column if not exists runtime_status text not null default ''`,
+		`alter table games add column if not exists runtime_error text not null default ''`,
+		`update games set status = 'approved' where status = ''`,
+		`update players set role = 'admin' where lower(display_name) in ('josh', 'ryan', 'ryanvogel')`,
+	}
+	for _, statement := range statements {
+		if _, err := s.pool.Exec(ctx, statement); err != nil {
+			return err
+		}
+	}
+
+	constraints := map[string]string{
+		"players_role_check": `alter table players add constraint players_role_check check (role in ('standard', 'admin'))`,
+		"games_status_check": `alter table games add constraint games_status_check check (status in ('pending', 'approved', 'rejected', 'disabled'))`,
+	}
+	for name, statement := range constraints {
+		var exists bool
+		if err := s.pool.QueryRow(ctx, `select exists(select 1 from pg_constraint where conname = $1)`, name).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			if _, err := s.pool.Exec(ctx, statement); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 const schemaSQL = `
 create table if not exists players (
   id uuid primary key default gen_random_uuid(),
   display_name varchar(12) not null,
   name_confirmed boolean not null default false,
+  role text not null default 'standard',
   created_at timestamptz not null default now(),
   last_seen_at timestamptz not null default now()
 );
@@ -494,6 +915,21 @@ create table if not exists games (
   max_players integer not null default 1,
   supports_mouse boolean not null default false,
   enabled boolean not null default true,
+  status text not null default 'approved',
+  submitted_by uuid references players(id) on delete set null,
+  reviewed_by uuid references players(id) on delete set null,
+  submitted_at timestamptz not null default now(),
+  reviewed_at timestamptz,
+  review_note text not null default '',
+  last_check_status text not null default '',
+  last_check_error text not null default '',
+  last_checked_at timestamptz,
+  session_secret text not null default '',
+  image_ref text not null default '',
+  image_digest text not null default '',
+  container_port integer not null default 8081,
+  runtime_status text not null default '',
+  runtime_error text not null default '',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );

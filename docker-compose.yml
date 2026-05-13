@@ -3,8 +3,25 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.sample-game
+    env_file:
+      - .env
     environment:
       PORT: "8081"
+      GGP_ENDPOINT_URL: ws://sample-game:8081/ggp
+    ports:
+      - "8081:8081"
+
+  blobfield:
+    build:
+      context: .
+      dockerfile: Dockerfile.blobfield
+    env_file:
+      - .env
+    environment:
+      PORT: "8082"
+      GGP_ENDPOINT_URL: ws://blobfield:8082/ggp
+    ports:
+      - "8082:8082"
 
   tetris:
     image: ghcr.io/0ximjosh/tetris-server:latest
@@ -20,10 +37,33 @@ services:
     depends_on:
       sample-game:
         condition: service_started
+      blobfield:
+        condition: service_started
     environment:
       GATEWAY_HOST: 0.0.0.0
       GATEWAY_PORT: "2222"
-      HOST_KEY_PATH: /tmp/gamegateway/id_ed25519
+      HOST_KEY_PATH: /var/lib/gamegateway/ssh/id_ed25519
       SAMPLE_GAME_URL: ws://sample-game:8081/ggp
+      BLOBFIELD_GAME_URL: ws://blobfield:8082/ggp
+    volumes:
+      - gateway-ssh:/var/lib/gamegateway/ssh
     ports:
       - "2222:2222"
+
+  spec-site:
+    build:
+      context: .
+      dockerfile: Dockerfile.spec-site
+    environment:
+      SITE_DOMAIN: :8080
+      ACME_EMAIL: ssl@ryan.ceo
+    ports:
+      - "8080:8080"
+    volumes:
+      - spec-caddy-data:/data
+      - spec-caddy-config:/config
+
+volumes:
+  gateway-ssh:
+  spec-caddy-data:
+  spec-caddy-config:

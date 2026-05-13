@@ -41,25 +41,47 @@ func (m Model) renderMenu() string {
 
 	if len(m.games) == 0 {
 		b.WriteString(errorStyle.Render("No enabled games found in Postgres."))
+		b.WriteString("\n\n")
 	} else {
 		for i, game := range m.games {
-			cursor := "  "
-			style := lipgloss.NewStyle().Foreground(lipgloss.Color("#cbd5e1"))
-			if i == m.selected {
-				cursor = "> "
-				style = focusStyle
-			}
+			cursor, style := menuCursor(m.selected == i)
 			b.WriteString(style.Render(cursor + game.Name))
 			b.WriteString("\n")
 			b.WriteString(mutedStyle.Render("    " + game.Description))
 			b.WriteString("\n")
-			b.WriteString(mutedStyle.Render("    " + game.EndpointURL))
+			b.WriteString(mutedStyle.Render("    players: " + activePlayerCount(m.activity.Count(game.ID)) + " playing now | capacity: " + playerCapacity(game.MaxPlayers)))
+			b.WriteString("\n")
+			location := game.EndpointURL
+			if game.ImageRef != "" {
+				location = game.ImageRef
+			}
+			b.WriteString(mutedStyle.Render("    " + location))
 			b.WriteString("\n\n")
 		}
+	}
+	submitIndex := len(m.games)
+	cursor, style := menuCursor(m.selected == submitIndex)
+	b.WriteString(style.Render(cursor + "Submit a Game"))
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render("    Send a ggp.cell.v1 endpoint for admin review."))
+	b.WriteString("\n\n")
+	if m.player.Role == "admin" {
+		cursor, style = menuCursor(m.selected == submitIndex+1)
+		b.WriteString(style.Render(cursor + "Submitted Games"))
+		b.WriteString("\n")
+		b.WriteString(mutedStyle.Render("    Admin review queue for pending games."))
+		b.WriteString("\n\n")
 	}
 
 	b.WriteString(mutedStyle.Render("up/down: move  enter: join  q: quit"))
 	return panelBorder.Width(max(m.width-4, 40)).Height(max(m.height-2, 12)).Padding(1, 2).Render(b.String())
+}
+
+func menuCursor(selected bool) (string, lipgloss.Style) {
+	if selected {
+		return "> ", focusStyle
+	}
+	return "  ", lipgloss.NewStyle().Foreground(lipgloss.Color("#cbd5e1"))
 }
 
 func (m Model) renderName() string {
@@ -89,6 +111,104 @@ func (m Model) renderName() string {
 	b.WriteString(mutedStyle.Render("If your chosen name is taken, a number will be appended automatically."))
 
 	return panelBorder.Width(max(m.width-4, 50)).Height(max(m.height-2, 14)).Padding(1, 2).Render(b.String())
+}
+
+func (m Model) renderSubmit() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("Submit a Game"))
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render("Submit an OCI/Docker image. It must listen on $PORT and speak ggp.cell.v1 at /ggp."))
+	b.WriteString("\n\n")
+
+	fields := []struct {
+		label string
+		value string
+	}{
+		{"Game ID", m.submitID},
+		{"Name", m.submitName},
+		{"Description", m.submitDescription},
+		{"Docker image", m.submitImageRef},
+		{"Container port", m.submitContainerPort},
+		{"Min cols", m.submitMinCols},
+		{"Min rows", m.submitMinRows},
+		{"Max players", m.submitMaxPlayers},
+		{"Game secret", maskSecret(m.submitSessionSecret)},
+	}
+	for i, field := range fields {
+		cursor, style := menuCursor(m.submitIndex == i)
+		value := field.value
+		if value == "" && i == 0 {
+			value = mutedStyle.Render("auto from name")
+		}
+		b.WriteString(style.Render(cursor + field.label + ": "))
+		b.WriteString(value)
+		if m.submitIndex == i {
+			b.WriteString(focusStyle.Render("_"))
+		}
+		b.WriteString("\n")
+	}
+	cursor, style := menuCursor(m.submitIndex == 9)
+	mouse := "no"
+	if m.submitSupportsMouse {
+		mouse = "yes"
+	}
+	b.WriteString(style.Render(cursor + "Supports mouse: "))
+	b.WriteString(mouse)
+	b.WriteString("\n")
+	cursor, style = menuCursor(m.submitIndex == submitFieldCount)
+	b.WriteString(style.Render(cursor + "Submit for Review"))
+	b.WriteString("\n\n")
+	if m.submitMessage != "" {
+		b.WriteString(mutedStyle.Render(m.submitMessage))
+		b.WriteString("\n\n")
+	}
+	b.WriteString(mutedStyle.Render("enter/tab: next  space: toggle  esc: lobby"))
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render("Use a pinned image tag or digest, not latest. For multiplayer, provide the same 32+ byte secret in your game server."))
+	return panelBorder.Width(max(m.width-4, 70)).Height(max(m.height-2, 18)).Padding(1, 2).Render(b.String())
+}
+
+func (m Model) renderAdmin() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("Submitted Games"))
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render("enter: test deployed container  a: approve  x: reject  c: re-check  r: reload  esc: lobby"))
+	b.WriteString("\n\n")
+	if m.adminLoading {
+		b.WriteString(mutedStyle.Render("Loading submissions..."))
+		b.WriteString("\n")
+	} else if len(m.adminGames) == 0 {
+		b.WriteString(goodStyle.Render("No pending games."))
+		b.WriteString("\n")
+	} else {
+		for i, game := range m.adminGames {
+			cursor, style := menuCursor(m.adminSelected == i)
+			b.WriteString(style.Render(cursor + game.Name + " [" + game.ID + "]"))
+			b.WriteString("\n")
+			b.WriteString(mutedStyle.Render("    by " + defaultText(game.SubmittedByName, "unknown") + " | players: " + playerCapacity(game.MaxPlayers)))
+			b.WriteString("\n")
+			image := game.ImageRef
+			if image == "" {
+				image = game.EndpointURL
+			}
+			b.WriteString(mutedStyle.Render("    " + image))
+			b.WriteString("\n")
+			check := game.LastCheckStatus
+			if check == "" {
+				check = "not checked"
+			}
+			b.WriteString(mutedStyle.Render("    check: " + check))
+			if game.LastCheckError != "" {
+				b.WriteString(errorStyle.Render(" - " + game.LastCheckError))
+			}
+			b.WriteString("\n\n")
+		}
+	}
+	if m.adminMessage != "" {
+		b.WriteString("\n")
+		b.WriteString(mutedStyle.Render(m.adminMessage))
+	}
+	return panelBorder.Width(max(m.width-4, 70)).Height(max(m.height-2, 18)).Padding(1, 2).Render(b.String())
 }
 
 func (m Model) renderGame() string {
@@ -342,6 +462,34 @@ func shortFingerprint(value string) string {
 		return value
 	}
 	return value[:18] + "..."
+}
+
+func playerCapacity(maxPlayers int) string {
+	if maxPlayers <= 1 {
+		return "solo"
+	}
+	return "up to " + strconv.Itoa(maxPlayers)
+}
+
+func activePlayerCount(count int) string {
+	if count == 1 {
+		return "1 player"
+	}
+	return strconv.Itoa(count) + " players"
+}
+
+func maskSecret(value string) string {
+	if value == "" {
+		return ""
+	}
+	return strings.Repeat("*", min(len([]rune(value)), 12))
+}
+
+func defaultText(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
 }
 
 func stripANSI(value string) string {

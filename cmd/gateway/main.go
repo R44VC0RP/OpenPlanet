@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"charm.land/wish/v2/logging"
 	"github.com/charmbracelet/ssh"
 
+	"gamegateway/internal/activity"
 	"gamegateway/internal/chat"
 	"gamegateway/internal/config"
 	"gamegateway/internal/identity"
@@ -27,6 +29,10 @@ import (
 
 func main() {
 	cfg := config.Load()
+	if len(os.Args) > 1 && os.Args[1] == "list-image-games" {
+		listImageGames(cfg)
+		return
+	}
 	ctx := context.Background()
 	if cfg.DatabaseURL == "" {
 		fatal("load configuration", errors.New("DATABASE_URL is required; set it in .env or the process environment"))
@@ -41,8 +47,18 @@ func main() {
 	if err := db.Migrate(ctx); err != nil {
 		fatal("migrate database", err)
 	}
-	if err := db.SeedSampleGame(ctx, cfg.SampleGameURL); err != nil {
+	sampleMaxPlayers := 1
+	if cfg.GGPSessionSecret != "" {
+		sampleMaxPlayers = 16
+	}
+	if err := db.SeedSampleGame(ctx, cfg.SampleGameURL, sampleMaxPlayers, cfg.GGPSessionSecret); err != nil {
 		fatal("seed sample game", err)
+	}
+	if err := db.SeedBlobfieldGame(ctx, cfg.BlobfieldGameURL, sampleMaxPlayers, cfg.GGPSessionSecret); err != nil {
+		fatal("seed blobfield game", err)
+	}
+	if err := db.SeedTetrisGame(ctx); err != nil {
+		fatal("seed tetris game", err)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(cfg.HostKeyPath), 0o700); err != nil {
@@ -50,6 +66,7 @@ func main() {
 	}
 
 	hub := chat.NewHub()
+	activityTracker := activity.NewTracker()
 	srv, err := wish.NewServer(
 		wish.WithAddress(net.JoinHostPort(cfg.Host, cfg.Port)),
 		wish.WithHostKeyPath(cfg.HostKeyPath),
@@ -57,7 +74,7 @@ func main() {
 			return key != nil
 		}),
 		wish.WithMiddleware(
-			wishtea.Middleware(sessionHandler(db, hub)),
+			wishtea.Middleware(sessionHandler(db, hub, activityTracker, cfg)),
 			activeterm.Middleware(),
 			logging.Middleware(),
 		),
@@ -84,7 +101,38 @@ func main() {
 	}
 }
 
-func sessionHandler(db *store.Store, hub *chat.Hub) wishtea.Handler {
+func listImageGames(cfg config.Config) {
+	if cfg.DatabaseURL == "" {
+		fatal("load configuration", errors.New("DATABASE_URL is required"))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	db, err := store.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		fatal("connect database", err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		fatal("migrate database", err)
+	}
+	games, err := db.ListRunnableImageGames(ctx)
+	if err != nil {
+		fatal("list image games", err)
+	}
+	for _, game := range games {
+		secret := game.SessionSecret
+		if secret == "" {
+			secret = "-"
+		}
+		fields := []string{game.ID, game.ImageRef, fmt.Sprintf("%d", game.ContainerPort), secret, game.Status}
+		for i := range fields {
+			fields[i] = strings.ReplaceAll(fields[i], "\t", " ")
+		}
+		fmt.Println(strings.Join(fields, "\t"))
+	}
+}
+
+func sessionHandler(db *store.Store, hub *chat.Hub, activityTracker *activity.Tracker, cfg config.Config) wishtea.Handler {
 	return func(s ssh.Session) (tea.Model, []tea.ProgramOption) {
 		pty, _, _ := s.Pty()
 		keyInfo, err := identity.FromSession(s)
@@ -106,12 +154,15 @@ func sessionHandler(db *store.Store, hub *chat.Hub) wishtea.Handler {
 		}
 
 		return ui.NewModel(ui.ModelConfig{
-			Player: player,
-			Games:  games,
-			Store:  db,
-			Hub:    hub,
-			Width:  pty.Window.Width,
-			Height: pty.Window.Height,
+			Player:           player,
+			Games:            games,
+			Store:            db,
+			Hub:              hub,
+			Activity:         activityTracker,
+			Width:            pty.Window.Width,
+			Height:           pty.Window.Height,
+			GGPIssuer:        cfg.GGPIssuer,
+			GGPSessionSecret: cfg.GGPSessionSecret,
 		}), wishtea.MakeOptions(s)
 	}
 }

@@ -7,22 +7,28 @@ import (
 )
 
 type Config struct {
-	Host          string
-	Port          string
-	HostKeyPath   string
-	DatabaseURL   string
-	SampleGameURL string
+	Host             string
+	Port             string
+	HostKeyPath      string
+	DatabaseURL      string
+	SampleGameURL    string
+	BlobfieldGameURL string
+	GGPIssuer        string
+	GGPSessionSecret string
 }
 
 func Load() Config {
 	loadDotEnv(".env")
 
 	return Config{
-		Host:          env("GATEWAY_HOST", "0.0.0.0"),
-		Port:          env("GATEWAY_PORT", "2222"),
-		HostKeyPath:   env("HOST_KEY_PATH", ".ssh/id_ed25519"),
-		DatabaseURL:   env("DATABASE_URL", ""),
-		SampleGameURL: env("SAMPLE_GAME_URL", "ws://localhost:8081/ggp"),
+		Host:             env("GATEWAY_HOST", "0.0.0.0"),
+		Port:             env("GATEWAY_PORT", "2222"),
+		HostKeyPath:      env("HOST_KEY_PATH", ".ssh/id_ed25519"),
+		DatabaseURL:      env("DATABASE_URL", ""),
+		SampleGameURL:    env("SAMPLE_GAME_URL", "ws://localhost:8081/ggp"),
+		BlobfieldGameURL: env("BLOBFIELD_GAME_URL", "ws://localhost:8082/ggp"),
+		GGPIssuer:        env("GGP_ISSUER", "gamegateway"),
+		GGPSessionSecret: env("GGP_SESSION_SECRET", ""),
 	}
 }
 

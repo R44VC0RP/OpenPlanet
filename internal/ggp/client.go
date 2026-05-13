@@ -13,10 +13,11 @@ import (
 )
 
 type Event struct {
-	Ready *Ready
-	Frame *Frame
-	Score *Score
-	Error error
+	Ready    *Ready
+	Frame    *Frame
+	Score    *Score
+	Presence *Presence
+	Error    error
 }
 
 type Client struct {
@@ -66,6 +67,13 @@ func (c *Client) SendResize(cols, rows int) error {
 
 func (c *Client) SendFocus(focused bool) error {
 	return c.write(Focus{Type: TypeFocus, Focused: focused})
+}
+
+func (c *Client) SendLeave(reason string) error {
+	if reason == "" {
+		reason = LeaveReasonUserExit
+	}
+	return c.write(Leave{Type: TypeLeave, Reason: reason})
 }
 
 func (c *Client) Close() error {
@@ -137,6 +145,13 @@ func (c *Client) readLoop() {
 				continue
 			}
 			c.emit(Event{Error: errors.New(gameErr.Message)})
+		case TypePresence:
+			var presence Presence
+			if err := json.Unmarshal(payload, &presence); err != nil {
+				c.emit(Event{Error: err})
+				continue
+			}
+			c.emit(Event{Presence: &presence})
 		}
 	}
 }
